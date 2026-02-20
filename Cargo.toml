@@ -1,0 +1,20 @@
+[workspace]
+resolver = "2"
+
+# Note: Core packages are in ../packages/ and referenced via path dependencies
+# This workspace is for application crates only
+
+members = [
+    "crates/anchor-engine",
+    # anchor-ui is now a WASM app (built separately)
+    # Future members:
+    # "crates/anchor-inference",
+    # "crates/nanobot-node",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "AGPL-3.0"
+repository = "https://github.com/your-org/anchor-rewrite-v0"
+authors = ["Anchor OS Contributors"]

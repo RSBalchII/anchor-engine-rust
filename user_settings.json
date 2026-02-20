@@ -1,0 +1,11 @@
+{
+  "inbox_path": "./inbox",
+  "external_inbox_path": "./external-inbox",
+  "mirrored_brain_path": "./mirrored_brain",
+  "database_path": "./anchor.db",
+  "watch_paths": [],
+  "github_token": null,
+  "watcher_stability_threshold_ms": 500,
+  "auto_ingest": true,
+  "ingestion_batch_size": 50
+}

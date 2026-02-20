@@ -1,0 +1,24 @@
+[package]
+name = "anchor-fingerprint"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "64-bit SimHash for text deduplication with Hamming distance calculations"
+repository.workspace = true
+keywords = ["simhash", "fingerprint", "deduplication", "hashing"]
+categories = ["algorithms", "cryptography"]
+
+[dependencies]
+murmur3 = "0.5"
+
+[dev-dependencies]
+criterion = { workspace = true }
+quickcheck = { workspace = true }
+
+[features]
+default = []
+simd = []  # Optional SIMD acceleration
+
+[[bench]]
+name = "fingerprint_bench"
+harness = false

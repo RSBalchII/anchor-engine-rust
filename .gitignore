@@ -1,0 +1,47 @@
+# Rust build
+/target/
+**/target/
+*.rlib
+*.dylib
+*.so
+*.pdb
+*.exe
+*.o
+*.rcgu.o
+
+# Database files
+*.db
+*.sqlite
+*.sqlite3
+anchor.db
+
+# Logs
+*.log
+logs/
+
+# Environment
+.env
+.env.local
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Test artifacts
+test_*.txt
+*.tmp
+
+# Data directories (content stays in original location)
+mirrored_brain/
+inbox/
+external-inbox/
+
+# Backup from cleanup script
+../anchor-rust-v0-locked-backup/

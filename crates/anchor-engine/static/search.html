@@ -1,0 +1,369 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Anchor Engine - Search</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        body {
+            background: linear-gradient(135deg, #0f0c29 0%, #302b63 50%, #24243e 100%);
+            min-height: 100vh;
+        }
+        .glass {
+            background: rgba(255, 255, 255, 0.05);
+            backdrop-filter: blur(10px);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+        }
+        .result-card {
+            transition: all 0.3s ease;
+        }
+        .result-card:hover {
+            transform: translateX(5px);
+            background: rgba(255, 255, 255, 0.08);
+        }
+        .loading-spinner {
+            border: 3px solid rgba(255,255,255,0.1);
+            border-top-color: #06b6d4;
+            border-radius: 50%;
+            width: 24px;
+            height: 24px;
+            animation: spin 1s linear infinite;
+        }
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+    </style>
+</head>
+<body class="text-white">
+    <div class="container mx-auto px-4 py-8 max-w-6xl">
+        <!-- Header -->
+        <div class="text-center mb-8">
+            <h1 class="text-5xl font-bold mb-2 bg-gradient-to-r from-cyan-400 to-purple-500 bg-clip-text text-transparent">
+                🚀 Anchor Engine
+            </h1>
+            <p class="text-gray-400">Privacy-first context engine</p>
+            <div id="status" class="mt-4 inline-flex items-center gap-2 glass px-4 py-2 rounded-full">
+                <div class="w-2 h-2 bg-green-500 rounded-full animate-pulse"></div>
+                <span class="text-sm">Engine Online</span>
+            </div>
+        </div>
+
+        <!-- Stats Bar -->
+        <div class="grid grid-cols-4 gap-4 mb-8">
+            <div class="glass rounded-lg p-4 text-center">
+                <div class="text-2xl font-bold text-cyan-400" id="stat-atoms">0</div>
+                <div class="text-xs text-gray-400">Atoms</div>
+            </div>
+            <div class="glass rounded-lg p-4 text-center">
+                <div class="text-2xl font-bold text-purple-400" id="stat-sources">0</div>
+                <div class="text-xs text-gray-400">Sources</div>
+            </div>
+            <div class="glass rounded-lg p-4 text-center">
+                <div class="text-2xl font-bold text-pink-400" id="stat-tags">0</div>
+                <div class="text-xs text-gray-400">Tags</div>
+            </div>
+            <div class="glass rounded-lg p-4 text-center">
+                <div class="text-2xl font-bold text-green-400" id="stat-latency">-</div>
+                <div class="text-xs text-gray-400">Latency (ms)</div>
+            </div>
+        </div>
+
+        <!-- Search Section -->
+        <div class="glass rounded-lg p-6 mb-8">
+            <h2 class="text-2xl font-bold mb-4 flex items-center gap-2">
+                <span>🔍</span> Search Knowledge Base
+            </h2>
+            <div class="flex gap-4 mb-4">
+                <input 
+                    type="text" 
+                    id="search-query"
+                    placeholder="Search query (e.g., #rust, programming, memory safety)"
+                    class="flex-1 glass border border-gray-700 rounded-lg px-4 py-3 bg-transparent focus:outline-none focus:border-cyan-400 transition"
+                    onkeypress="if(event.key === 'Enter') performSearch()"
+                >
+                <button 
+                    onclick="performSearch()"
+                    class="bg-gradient-to-r from-cyan-500 to-blue-500 hover:from-cyan-600 hover:to-blue-600 px-6 py-3 rounded-lg font-semibold transition flex items-center gap-2"
+                >
+                    <span id="search-icon">🔍</span>
+                    <span id="search-text">Search</span>
+                </button>
+            </div>
+            
+            <!-- Search Options -->
+            <div class="flex gap-4 mb-4 text-sm">
+                <div>
+                    <label class="block text-gray-400 mb-1">Max Results</label>
+                    <input type="number" id="max-results" value="50" class="glass border border-gray-700 rounded px-3 py-2 bg-transparent w-24" />
+                </div>
+                <div>
+                    <label class="block text-gray-400 mb-1">Planet Budget</label>
+                    <input type="number" id="planet-budget" value="0.7" step="0.1" min="0" max="1" class="glass border border-gray-700 rounded px-3 py-2 bg-transparent w-24" />
+                </div>
+                <div>
+                    <label class="block text-gray-400 mb-1">Moon Budget</label>
+                    <input type="number" id="moon-budget" value="0.3" step="0.1" min="0" max="1" class="glass border border-gray-700 rounded px-3 py-2 bg-transparent w-24" />
+                </div>
+            </div>
+
+            <!-- Results -->
+            <div id="results-container" class="mt-6">
+                <div id="loading" class="hidden text-center py-8">
+                    <div class="loading-spinner mx-auto mb-4"></div>
+                    <p class="text-gray-400">Searching...</p>
+                </div>
+                <div id="results"></div>
+            </div>
+        </div>
+
+        <!-- Ingest Section -->
+        <div class="glass rounded-lg p-6 mb-8">
+            <h2 class="text-2xl font-bold mb-4 flex items-center gap-2">
+                <span>📥</span> Ingest Content
+            </h2>
+            <div class="grid grid-cols-2 gap-4 mb-4">
+                <div>
+                    <label class="block text-gray-400 mb-2">Source Name</label>
+                    <input 
+                        type="text" 
+                        id="ingest-source"
+                        placeholder="e.g., document.md"
+                        class="w-full glass border border-gray-700 rounded-lg px-4 py-3 bg-transparent focus:outline-none focus:border-cyan-400 transition"
+                    >
+                </div>
+                <div>
+                    <label class="block text-gray-400 mb-2">Bucket</label>
+                    <input 
+                        type="text" 
+                        id="ingest-bucket"
+                        placeholder="e.g., docs, notes, code"
+                        class="w-full glass border border-gray-700 rounded-lg px-4 py-3 bg-transparent focus:outline-none focus:border-cyan-400 transition"
+                    >
+                </div>
+            </div>
+            <textarea 
+                id="ingest-content"
+                placeholder="Paste your content here..."
+                rows="6"
+                class="w-full glass border border-gray-700 rounded-lg px-4 py-3 bg-transparent focus:outline-none focus:border-cyan-400 transition mb-4"
+            ></textarea>
+            <button 
+                onclick="ingestContent()"
+                class="bg-gradient-to-r from-green-500 to-emerald-500 hover:from-green-600 hover:to-emerald-600 px-6 py-3 rounded-lg font-semibold transition flex items-center gap-2"
+            >
+                <span>📥</span>
+                <span id="ingest-text">Ingest</span>
+            </button>
+            <div id="ingest-result" class="mt-4 hidden"></div>
+        </div>
+
+        <!-- API Info -->
+        <div class="glass rounded-lg p-6 text-sm text-gray-400">
+            <h3 class="font-bold text-white mb-2">API Endpoints</h3>
+            <div class="grid grid-cols-2 gap-2">
+                <div><code class="bg-gray-800 px-2 py-1 rounded">GET /health</code> - Health check</div>
+                <div><code class="bg-gray-800 px-2 py-1 rounded">GET /stats</code> - Database stats</div>
+                <div><code class="bg-gray-800 px-2 py-1 rounded">POST /v1/memory/search</code> - Search</div>
+                <div><code class="bg-gray-800 px-2 py-1 rounded">POST /v1/memory/ingest</code> - Ingest</div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const API_BASE = '';
+
+        // Update stats every 5 seconds
+        async function updateStats() {
+            try {
+                const response = await fetch(`${API_BASE}/stats`);
+                const stats = await response.json();
+                
+                document.getElementById('stat-atoms').textContent = stats.atoms;
+                document.getElementById('stat-sources').textContent = stats.sources;
+                document.getElementById('stat-tags').textContent = stats.tags;
+            } catch (error) {
+                console.error('Failed to update stats:', error);
+                document.getElementById('status').innerHTML = `
+                    <div class="w-2 h-2 bg-red-500 rounded-full"></div>
+                    <span class="text-sm">Engine Offline</span>
+                `;
+            }
+        }
+
+        async function performSearch() {
+            const query = document.getElementById('search-query').value.trim();
+            if (!query) return;
+
+            const loading = document.getElementById('loading');
+            const results = document.getElementById('results');
+            const searchText = document.getElementById('search-text');
+            const searchIcon = document.getElementById('search-icon');
+
+            loading.classList.remove('hidden');
+            results.innerHTML = '';
+            searchText.textContent = 'Searching...';
+            searchIcon.textContent = '⏳';
+
+            const startTime = Date.now();
+
+            try {
+                const response = await fetch(`${API_BASE}/v1/memory/search`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        query: query,
+                        max_results: parseInt(document.getElementById('max-results').value) || 50,
+                        budget: {
+                            planet_budget: parseFloat(document.getElementById('planet-budget').value) || 0.7,
+                            moon_budget: parseFloat(document.getElementById('moon-budget').value) || 0.3,
+                            total_tokens: 8192
+                        }
+                    })
+                });
+
+                const data = await response.json();
+                const latency = Date.now() - startTime;
+                
+                document.getElementById('stat-latency').textContent = latency;
+
+                if (data.results.length === 0) {
+                    results.innerHTML = `
+                        <div class="text-center py-8 text-gray-400">
+                            <p class="text-4xl mb-4">🔍</p>
+                            <p>No results found for "<span class="text-cyan-400">${query}</span>"</p>
+                            <p class="text-sm mt-2">Try ingesting some content first!</p>
+                        </div>
+                    `;
+                } else {
+                    results.innerHTML = `
+                        <div class="mb-4 flex justify-between items-center">
+                            <h3 class="text-lg font-semibold">
+                                Found ${data.total} result${data.total !== 1 ? 's' : ''}
+                            </h3>
+                            <div class="text-sm text-gray-400">
+                                ${data.stats.planets} planets • ${data.stats.moons} moons • ${data.stats.duration_ms.toFixed(1)}ms
+                            </div>
+                        </div>
+                        <div class="space-y-4">
+                            ${data.results.map(result => `
+                                <div class="result-card glass rounded-lg p-4 border-l-4 ${result.result_type === 'planet' ? 'border-cyan-400' : 'border-purple-400'}">
+                                    <div class="flex justify-between items-start mb-2">
+                                        <div class="flex gap-2">
+                                            <span class="glass px-2 py-1 rounded text-xs ${result.result_type === 'planet' ? 'bg-cyan-500/20 text-cyan-400' : 'bg-purple-500/20 text-purple-400'}">
+                                                ${result.result_type.toUpperCase()}
+                                            </span>
+                                            ${result.matched_tags.map(tag => `
+                                                <span class="glass px-2 py-1 rounded text-xs bg-gray-700 text-gray-300">${tag}</span>
+                                            `).join('')}
+                                        </div>
+                                        <div class="flex items-center gap-2">
+                                            <span class="text-xs text-gray-400">Relevance:</span>
+                                            <span class="glass px-3 py-1 rounded-full text-sm font-semibold ${
+                                                result.relevance > 0.7 ? 'bg-green-500/20 text-green-400' :
+                                                result.relevance > 0.4 ? 'bg-yellow-500/20 text-yellow-400' :
+                                                'bg-red-500/20 text-red-400'
+                                            }">
+                                                ${(result.relevance * 100).toFixed(0)}%
+                                            </span>
+                                        </div>
+                                    </div>
+                                    <p class="text-gray-300 mb-2 line-clamp-3">${result.content}</p>
+                                    <div class="flex justify-between items-center text-xs text-gray-400">
+                                        <span>Source: ${result.source_id}</span>
+                                        <span>Chars ${result.offsets.char_start}-${result.offsets.char_end}</span>
+                                    </div>
+                                </div>
+                            `).join('')}
+                        </div>
+                    `;
+                }
+            } catch (error) {
+                results.innerHTML = `
+                    <div class="text-center py-8 text-red-400">
+                        <p class="text-xl mb-2">❌ Error</p>
+                        <p>${error.message}</p>
+                    </div>
+                `;
+            } finally {
+                loading.classList.add('hidden');
+                searchText.textContent = 'Search';
+                searchIcon.textContent = '🔍';
+            }
+        }
+
+        async function ingestContent() {
+            const source = document.getElementById('ingest-source').value.trim();
+            const content = document.getElementById('ingest-content').value.trim();
+            const bucket = document.getElementById('ingest-bucket').value.trim();
+
+            if (!source || !content) {
+                alert('Please provide both source name and content');
+                return;
+            }
+
+            const ingestText = document.getElementById('ingest-text');
+            const resultDiv = document.getElementById('ingest-result');
+
+            ingestText.textContent = 'Ingesting...';
+            resultDiv.classList.add('hidden');
+
+            try {
+                const response = await fetch(`${API_BASE}/v1/memory/ingest`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        source: source,
+                        content: content,
+                        bucket: bucket || null,
+                        options: {
+                            extract_tags: true,
+                            max_keywords: 10,
+                            sanitize: true
+                        }
+                    })
+                });
+
+                const data = await response.json();
+                
+                resultDiv.innerHTML = `
+                    <div class="bg-green-500/20 border border-green-500 rounded-lg p-4">
+                        <p class="text-green-400 font-semibold mb-2">✅ Successfully ingested!</p>
+                        <p class="text-sm text-gray-300">
+                            Created <span class="text-green-400 font-semibold">${data.atoms_created}</span> atoms from "${source}"
+                        </p>
+                        ${data.tags.length > 0 ? `
+                            <p class="text-sm text-gray-400 mt-2">
+                                Tags: ${data.tags.join(', ')}
+                            </p>
+                        ` : ''}
+                    </div>
+                `;
+                resultDiv.classList.remove('hidden');
+
+                // Clear form
+                document.getElementById('ingest-source').value = '';
+                document.getElementById('ingest-content').value = '';
+                document.getElementById('ingest-bucket').value = '';
+
+                // Update stats
+                updateStats();
+            } catch (error) {
+                resultDiv.innerHTML = `
+                    <div class="bg-red-500/20 border border-red-500 rounded-lg p-4">
+                        <p class="text-red-400 font-semibold mb-2">❌ Ingest failed</p>
+                        <p class="text-sm text-gray-300">${error.message}</p>
+                    </div>
+                `;
+                resultDiv.classList.remove('hidden');
+            } finally {
+                ingestText.textContent = 'Ingest';
+            }
+        }
+
+        // Initial stats load
+        updateStats();
+        setInterval(updateStats, 5000);
+    </script>
+</body>
+</html>
