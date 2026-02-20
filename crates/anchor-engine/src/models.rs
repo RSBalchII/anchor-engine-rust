@@ -19,6 +19,9 @@ pub struct Atom {
     pub timestamp: f64,
     /// 64-bit SimHash fingerprint
     pub simhash: u64,
+    /// Associated tags
+    #[serde(default)]
+    pub tags: Vec<String>,
     /// Optional metadata
     #[serde(skip_serializing_if = "Option::is_none")]
     pub metadata: Option<serde_json::Value>,

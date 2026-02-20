@@ -40,7 +40,7 @@ pub use models::*;
 pub use service::AnchorService;
 pub use api::{start_server, create_router, SharedState};
 pub use config::{Config, UserSettings};
-pub use services::{WatchdogService, IngestionService, IngestionResult, IngestionConfig};
+pub use services::{WatchdogService, IngestionService, IngestionResult, IngestionConfig, GitHubService, GitHubRepo, AutoSynonymGenerator};
 
 /// Library version
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

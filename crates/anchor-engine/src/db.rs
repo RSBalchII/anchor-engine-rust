@@ -312,6 +312,7 @@ impl Database {
                 char_end: row.get(4)?,
                 timestamp: row.get(5)?,
                 simhash,
+                tags: Vec::new(),
                 metadata: metadata.and_then(|m| serde_json::from_str(&m).ok()),
             })
         })?;
@@ -341,6 +342,7 @@ impl Database {
                 char_end: row.get(4)?,
                 timestamp: row.get(5)?,
                 simhash,
+                tags: Vec::new(),
                 metadata: metadata.and_then(|m| serde_json::from_str(&m).ok()),
             })
         })?;
@@ -374,6 +376,7 @@ impl Database {
                 char_end: row.get(4)?,
                 timestamp: row.get(5)?,
                 simhash,
+                tags: Vec::new(),
                 metadata: metadata.and_then(|m| serde_json::from_str(&m).ok()),
             })
         })?;
@@ -448,6 +451,7 @@ impl Database {
                 char_end: row.get(4)?,
                 timestamp: row.get(5)?,
                 simhash,
+                tags: Vec::new(),
                 metadata: metadata.and_then(|m| serde_json::from_str(&m).ok()),
             })
         })?;
@@ -461,6 +465,47 @@ impl Database {
         let mut stmt = conn.prepare("SELECT DISTINCT tag FROM tags ORDER BY tag")?;
         let tags = stmt.query_map([], |row| row.get(0))?;
         tags.collect::<rusqlite::Result<Vec<_>>>().map_err(DbError::from)
+    }
+
+    /// Get all atoms (for synonym generation).
+    pub async fn get_all_atoms(&self) -> Result<Vec<crate::models::Atom>> {
+        let conn = self.conn.lock().await;
+        let mut stmt = conn.prepare(
+            "SELECT id, source_id, content, char_start, char_end, timestamp, simhash, metadata 
+             FROM atoms"
+        )?;
+        
+        let atoms = stmt.query_map([], |row| {
+            let simhash_str: String = row.get(6)?;
+            let simhash = u64::from_str_radix(&simhash_str.trim_start_matches("0x"), 16)
+                .unwrap_or(0);
+            
+            let metadata: Option<String> = row.get(7)?;
+            Ok(crate::models::Atom {
+                id: row.get(0)?,
+                source_id: row.get(1)?,
+                content: row.get(2)?,
+                char_start: row.get(3)?,
+                char_end: row.get(4)?,
+                timestamp: row.get(5)?,
+                simhash,
+                tags: Vec::new(),  // Will be populated separately
+                metadata: metadata.and_then(|m| serde_json::from_str(&m).ok()),
+            })
+        })?;
+        
+        let mut atoms = atoms.collect::<rusqlite::Result<Vec<_>>>().map_err(DbError::from)?;
+        
+        // Populate tags for each atom
+        for atom in &mut atoms {
+            let mut tag_stmt = conn.prepare(
+                "SELECT tag FROM tags WHERE atom_id = ?1"
+            )?;
+            let tags = tag_stmt.query_map([atom.id], |row| row.get(0))?;
+            atom.tags = tags.collect::<rusqlite::Result<Vec<_>>>().unwrap_or_default();
+        }
+        
+        Ok(atoms)
     }
 
     // ==================== Stats ====================

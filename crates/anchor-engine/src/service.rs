@@ -72,7 +72,7 @@ impl AnchorService {
         for atom_data in &atoms {
             // Generate SimHash
             let hash = simhash(&atom_data.content);
-            
+
             // Create atom record
             let atom = Atom {
                 id: 0, // Will be assigned by DB
@@ -82,6 +82,7 @@ impl AnchorService {
                 char_end: atom_data.char_end,
                 timestamp: chrono::Utc::now().timestamp() as f64,
                 simhash: hash,
+                tags: Vec::new(),
                 metadata: None,
             };
             

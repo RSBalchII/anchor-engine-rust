@@ -213,6 +213,7 @@ impl IngestionService {
                     .unwrap()
                     .as_secs_f64(),
                 simhash: hash,
+                tags: Vec::new(),
                 metadata: None,
             };
 
@@ -381,6 +382,7 @@ impl IngestionService {
                     .unwrap()
                     .as_secs_f64(),
                 simhash: hash,
+                tags: Vec::new(),
                 metadata: None,
             };
 

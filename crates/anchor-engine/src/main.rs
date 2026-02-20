@@ -9,8 +9,9 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use tracing_subscriber::{self, EnvFilter};
+use tracing::error;
 
-use anchor_engine::{Database, AnchorService, start_server, Config, WatchdogService, IngestionService, IngestionConfig};
+use anchor_engine::{Database, AnchorService, start_server, Config, WatchdogService, IngestionService, IngestionConfig, AutoSynonymGenerator};
 
 /// CLI arguments.
 #[derive(Debug)]
@@ -148,6 +149,30 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("   Watching:");
     for path in config.settings.all_watch_paths() {
         println!("     - {:?}", path);
+    }
+    println!();
+    
+    // Auto-generate synonym rings (Standard 111)
+    tracing::info!("🔄 [Startup] Auto-generating synonym rings from data (Standard 111)...");
+    let synonym_generator = AutoSynonymGenerator::new();
+    let synonyms = synonym_generator.generate_all(&db).await;
+    
+    if !synonyms.is_empty() {
+        let synonym_path = PathBuf::from("synonym-ring-auto.json");
+        if let Err(e) = synonym_generator.save_synonym_rings(&synonyms, &synonym_path) {
+            error!("Failed to save synonym rings: {}", e);
+        }
+        
+        let summary_path = PathBuf::from("synonym-ring-auto-summary.md");
+        if let Err(e) = synonym_generator.generate_summary(&synonyms, &summary_path) {
+            error!("Failed to generate synonym summary: {}", e);
+        }
+        
+        println!("🔄 [SynonymGenerator] Generated {} synonym rings", synonyms.len());
+        println!("   Saved to: {:?}", synonym_path);
+        println!("   Summary: {:?}", summary_path);
+    } else {
+        println!("🔄 [SynonymGenerator] No synonyms found (database may be empty)");
     }
     println!();
     
