@@ -4,12 +4,12 @@
 //! for new files and changes, then triggers the ingestion pipeline.
 
 use std::collections::HashSet;
-use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::{Mutex, RwLock};
 use tokio::time::{Duration, sleep};
-use tracing::{info, warn, error, debug};
+use tracing::{info, warn, error};
+use ignore::WalkBuilder;
 
 use crate::config::UserSettings;
 use crate::services::ingestion::IngestionService;
@@ -34,12 +34,12 @@ impl Default for WatchdogConfig {
             stability_threshold_ms: 500,
             auto_ingest: true,
             ignore_patterns: vec![
-                ".".to_string(),           // Dotfiles
-                ".git".to_string(),        // Git directories
+                ".git".to_string(),        // Git directories (not all dotfiles)
                 "node_modules".to_string(), // Node modules
                 "target".to_string(),      // Rust build artifacts
                 "*.swp".to_string(),       // Vim swap files
                 "*.bak".to_string(),       // Backup files
+                "*.log".to_string(),       // Log files
             ],
         }
     }
@@ -171,31 +171,38 @@ impl WatchdogService {
         }
     }
 
-    /// Scan a directory for files to ingest (recursively).
+    /// Scan a directory for files to ingest (recursively, respecting .gitignore).
     async fn scan_directory(&self, dir_path: &Path) -> Result<(), std::io::Error> {
         if !dir_path.exists() {
             return Ok(());
         }
 
-        // Use a stack for iterative recursive scanning
-        let mut stack = vec![dir_path.to_path_buf()];
+        // Use ignore crate for .gitignore-aware walking
+        let mut found_files = Vec::new();
+        
+        let walker = WalkBuilder::new(dir_path)
+            .hidden(false)  // Don't skip hidden files (we want .gitignore etc)
+            .git_global(true)  // Use global gitignore
+            .git_ignore(true)  // Use .gitignore files
+            .ignore(false)  // Don't use .ignore files
+            .build();
 
-        while let Some(current_path) = stack.pop() {
-            let mut entries = tokio::fs::read_dir(&current_path).await?;
-            
-            while let Some(entry) = entries.next_entry().await? {
-                let path = entry.path();
-
-                if path.is_dir() {
-                    // Skip ignored directories
-                    if !self.should_ignore(&path) {
-                        stack.push(path);
+        for result in walker {
+            match result {
+                Ok(entry) => {
+                    if entry.file_type().map(|ft| ft.is_file()).unwrap_or(false) {
+                        found_files.push(entry.path().to_path_buf());
                     }
-                } else {
-                    // Process file
-                    self.process_file(&path).await;
+                }
+                Err(e) => {
+                    warn!("Error walking directory: {}", e);
                 }
             }
+        }
+
+        // Process found files
+        for path in found_files {
+            self.process_file(&path).await;
         }
 
         Ok(())

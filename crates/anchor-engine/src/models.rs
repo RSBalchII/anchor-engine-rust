@@ -78,13 +78,14 @@ fn default_max_results() -> usize {
 }
 
 /// Search mode.
-#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub enum SearchMode {
     #[default]
     Combined,
     PlanetsOnly,
     MoonsOnly,
+    MaxRecall,  // For 16K+ token queries
 }
 
 /// Budget configuration for search.
@@ -99,6 +100,9 @@ pub struct BudgetConfig {
     /// Total token budget
     #[serde(default = "default_token_budget")]
     pub total_tokens: usize,
+    /// Enable max-recall mode (for 16K+ token queries)
+    #[serde(default)]
+    pub max_recall: bool,
 }
 
 fn default_planet_budget() -> f32 {
@@ -119,6 +123,7 @@ impl Default for BudgetConfig {
             planet_budget: default_planet_budget(),
             moon_budget: default_moon_budget(),
             total_tokens: default_token_budget(),
+            max_recall: false,
         }
     }
 }

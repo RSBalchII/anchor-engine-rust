@@ -132,23 +132,42 @@ impl AnchorService {
     pub async fn search(&self, request: SearchRequest) -> Result<SearchResponse> {
         let start = Instant::now();
 
+        // Auto-enable max-recall for 16K+ token queries
+        let use_max_recall = request.budget.total_tokens >= 16384 
+            || request.budget.max_recall 
+            || request.mode == SearchMode::MaxRecall;
+        
         // 🔍 DEBUG log for search execution
-        debug!("🔍 Executing search: query=\"{}\", mode={:?}", request.query, request.mode);
+        info!("🔍 SEARCH: \"{}\" (max_recall={}, tokens={})", 
+              request.query, use_max_recall, request.budget.total_tokens);
 
-        // Configure tag walker
-        let config = TagWalkerConfig::default()
-            .with_max_results(request.max_results)
-            .with_planet_budget(request.budget.planet_budget)
-            .with_moon_budget(request.budget.moon_budget);
+        // Configure tag walker based on mode
+        let config = if use_max_recall {
+            // Max-recall mode: zero temporal decay, 3 hops, high serendipity
+            info!("   ├─ Max-recall mode: 3 hops, zero decay");
+            TagWalkerConfig::default()
+                .with_max_results(request.max_results)
+                .with_planet_budget(request.budget.planet_budget)
+                .with_moon_budget(request.budget.moon_budget)
+                .with_max_hops(3)  // 3 hops for max recall
+                .with_temporal_decay(0.0)  // Zero decay - all memories equally important
+                .with_damping(0.75)  // Lower damping for deeper exploration
+        } else {
+            // Standard mode: default settings
+            TagWalkerConfig::default()
+                .with_max_results(request.max_results)
+                .with_planet_budget(request.budget.planet_budget)
+                .with_moon_budget(request.budget.moon_budget)
+        };
 
         // Perform search
         let walker_results = self.tag_walker.search(&request.query, &config);
-        
+
         // Convert walker results to response format
         let mut results = Vec::new();
         let mut planets_count = 0;
         let mut moons_count = 0;
-        
+
         for walker_result in &walker_results {
             if let Ok(atom) = self.db.get_atom(walker_result.atom_id).await {
                 let result_type = match walker_result.result_type {
@@ -161,7 +180,7 @@ impl AnchorService {
                         "moon"
                     }
                 };
-                
+
                 results.push(SearchResultItem {
                     atom_id: atom.id,
                     source_id: atom.source_id,
@@ -176,10 +195,13 @@ impl AnchorService {
                 });
             }
         }
-        
+
         let total = results.len();
         let duration = start.elapsed().as_millis() as f64;
         
+        info!("   └─ ✅ COMPLETE: {} results ({} planets, {} moons) in {:.1}ms", 
+              total, planets_count, moons_count, duration);
+
         Ok(SearchResponse {
             results,
             query: request.query,
