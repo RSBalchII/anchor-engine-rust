@@ -54,6 +54,7 @@ dependencies = [
  "http 1.4.0",
  "ignore",
  "once_cell",
+ "regex",
  "reqwest",
  "rusqlite",
  "serde",
