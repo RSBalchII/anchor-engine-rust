@@ -134,13 +134,30 @@ impl AnchorService {
         let start = Instant::now();
 
         // Auto-enable max-recall for 16K+ token queries
-        let use_max_recall = request.budget.total_tokens >= 16384 
-            || request.budget.max_recall 
+        let use_max_recall = request.budget.total_tokens >= 16384
+            || request.budget.max_recall
             || request.mode == SearchMode::MaxRecall;
+
+        // Extract keywords from query and convert to tags
+        let query_tags = anchor_keyextract::extract_keywords(&request.query, 20);
+        let tag_query: Vec<String> = query_tags
+            .iter()
+            .filter(|kw| kw.score > 0.2)
+            .map(|kw| format!("#{}", kw.term.to_lowercase()))
+            .collect();
         
+        let query_str = if tag_query.is_empty() {
+            request.query.clone()  // Fallback to original query
+        } else {
+            tag_query.join(" ")  // Use extracted tags
+        };
+
         // 🔍 DEBUG log for search execution
-        info!("🔍 SEARCH: \"{}\" (max_recall={}, tokens={})", 
+        info!("🔍 SEARCH: \"{}\" (max_recall={}, tokens={})",
               request.query, use_max_recall, request.budget.total_tokens);
+        if !tag_query.is_empty() {
+            info!("   ├─ Extracted tags: {}", tag_query.join(", "));
+        }
 
         // Configure tag walker based on mode
         let config = if use_max_recall {
@@ -162,7 +179,7 @@ impl AnchorService {
         };
 
         // Perform search
-        let walker_results = self.tag_walker.search(&request.query, &config);
+        let walker_results = self.tag_walker.search(&query_str, &config);
 
         // Convert walker results to response format
         let mut results = Vec::new();

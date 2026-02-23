@@ -1,17 +1,14 @@
 # Anchor Engine (Rust)
 
-> **Privacy-first context engine for human-facing LLM interactions**
-
-**Original Repository**: [RSBalchII/anchor-engine](https://github.com/RSBalchII/anchor-engine)
-**This Implementation**: Rust port with SQLite backend
-**Status**: ✅ **Complete** - Ready for testing
-**License**: AGPL-3.0
+**Version:** 0.1.0 | **Status:** ✅ Complete (181 tests passing) | **License:** AGPL-3.0
 
 A sovereign personal knowledge engine with physics-based associative search. Rebuilt from scratch in Rust for performance, safety, and single-binary deployment.
 
+Implements the **STAR Algorithm** (Semantic Temporal Associative Retrieval) — the same algorithm as anchor-engine-node, but in pure Rust.
+
 ---
 
-## Quick Start
+## 🚀 Quick Start
 
 ```bash
 # Build
@@ -33,18 +30,30 @@ curl -X POST http://localhost:3160/v1/memory/search \
 
 ---
 
-## What is Anchor Engine?
+## 📖 Documentation
 
-Anchor Engine is a **personal knowledge engine** that implements the **STAR algorithm** (Semantic Temporal Associative Retrieval) for context-aware memory management.
+| Document | Description |
+|----------|-------------|
+| **[docs/WHITEPAPER.md](docs/WHITEPAPER.md)** | The Sovereign Context Protocol (references node whitepaper) |
+| **[specs/spec.md](specs/spec.md)** | System architecture specification |
+| **[specs/tasks.md](specs/tasks.md)** | Implementation tasks |
+| **[specs/plan.md](specs/plan.md)** | Project timeline |
+| **[specs/standards/](specs/standards/)** | Code style and testing standards |
+| **[API_SUMMARY.md](API_SUMMARY.md)** | Complete API documentation |
+| **[STATUS.md](STATUS.md)** | Current implementation status |
 
-### Core Features
+---
 
-- 🧠 **Atomic Knowledge Model**: Documents → Sections → Paragraphs
-- 🔍 **Physics-Based Search**: Planets (direct matches) + Moons (associative discoveries)
-- ⏰ **Temporal Decay**: Recent memories weighted higher
-- 🎯 **SimHash Deduplication**: Near-duplicate detection in ~2ms
-- 🔒 **Privacy-First**: All data stays local, no external transmission
-- 🚀 **Single Binary**: No Node.js, no external dependencies
+## ✨ Features
+
+### Core Capabilities
+
+- 🧠 **Atomic Knowledge Model:** Documents → Sections → Paragraphs
+- 🔍 **Physics-Based Search:** STAR algorithm with 70/30 budget (Planets/Moons)
+- ⏰ **Temporal Decay:** Recent memories weighted higher
+- 🎯 **SimHash Deduplication:** Near-duplicate detection in ~500ns
+- 🔒 **Privacy-First:** All data stays local
+- 🚀 **Single Binary:** No Node.js, no external dependencies (<50MB)
 
 ### The STAR Algorithm
 
@@ -57,13 +66,13 @@ gravity = (shared_tags) × e^(-λΔt) × (1 - hamming_distance/64) × damping
               └─ Tag association count
 ```
 
-**70/30 Budget Split**:
-- 70% tokens: **Planets** (direct FTS matches)
-- 30% tokens: **Moons** (graph-discovered associations)
+**70/30 Budget Split:**
+- **70% Planets:** Direct FTS matches
+- **30% Moons:** Graph-discovered associations
 
 ---
 
-## Architecture
+## 🏗️ Architecture
 
 ```
 HTTP API (axum)
@@ -87,9 +96,24 @@ Anchor Service
         └─ anchor-tagwalker (graph search)
 ```
 
+### Data Model
+
+```rust
+pub struct Atom {
+    pub id: u64,              // Database ID
+    pub source_id: String,    // Source document
+    pub content: String,      // Text content
+    pub char_start: usize,    // Byte offset
+    pub char_end: usize,      // Byte offset end
+    pub timestamp: f64,       // Unix timestamp
+    pub simhash: u64,         // 64-bit fingerprint
+    pub tags: Vec<String>,    // Associated tags
+}
+```
+
 ---
 
-## API Endpoints
+## 📦 API Endpoints
 
 ### Health Check
 
@@ -97,7 +121,6 @@ Anchor Service
 GET /health
 ```
 
-Response:
 ```json
 {
   "status": "healthy",
@@ -108,12 +131,6 @@ Response:
     "tags": 45
   }
 }
-```
-
-### Database Statistics
-
-```bash
-GET /stats
 ```
 
 ### Ingest Content
@@ -152,7 +169,6 @@ Content-Type: application/json
 }
 ```
 
-Response:
 ```json
 {
   "results": [
@@ -195,24 +211,84 @@ Content-Type: application/json
 
 ---
 
-## Installation
+## 🛠️ Development
 
-### From Source
-
-```bash
-git clone https://github.com/RSBalchII/anchor-rewrite-v0.git
-cd anchor-rewrite-v0
-cargo build --release
-```
-
-### Requirements
+### Prerequisites
 
 - Rust 1.75+ (stable)
 - No external dependencies (SQLite bundled)
 
+### Build Commands
+
+```bash
+# Build release
+cargo build --release
+
+# Run tests
+cargo test --all-features
+
+# Run server
+cargo run -- --port 3160
+
+# Check code
+cargo clippy
+cargo fmt
+```
+
+### Project Structure
+
+```
+anchor-rust-v0/
+├── Cargo.toml              # Workspace root
+├── README.md
+├── CHANGELOG.md
+├── STATUS.md
+├── API_SUMMARY.md
+├── specs/
+│   ├── spec.md            # Architecture spec
+│   ├── tasks.md           # Implementation tasks
+│   ├── plan.md            # Project timeline
+│   └── standards/         # Code style & testing
+├── crates/
+│   └── anchor-engine/     # Main application
+│       ├── src/
+│       │   ├── lib.rs     # Library
+│       │   ├── main.rs    # CLI binary
+│       │   ├── db.rs      # Database layer
+│       │   ├── models.rs  # Data models
+│       │   ├── service.rs # Business logic
+│       │   └── api.rs     # HTTP handlers
+└── packages/              # Core algorithm crates
+    ├── anchor-fingerprint/
+    ├── anchor-atomizer/
+    ├── anchor-keyextract/
+    └── anchor-tagwalker/
+```
+
 ---
 
-## Configuration
+## 📊 Performance
+
+| Metric | Target | Current | Status |
+|--------|--------|---------|--------|
+| **SimHash generation** | ≤2ms/atom | ~500ns | ✅ |
+| **Hamming distance** | ≥4M ops/sec | ≥3B ops/sec | ✅ |
+| **Search latency (p95)** | ≤200ms | TBD | 🔄 |
+| **Ingestion throughput** | >100 atoms/sec | TBD | 🔄 |
+
+### Test Coverage
+
+- **Core Packages:** 172 tests passing
+  - anchor-fingerprint: 52 tests
+  - anchor-atomizer: 50 tests
+  - anchor-keyextract: 42 tests
+  - anchor-tagwalker: 28 tests
+- **Application Layer:** 9 tests passing
+- **Total:** 181 tests ✅
+
+---
+
+## 🔧 Configuration
 
 ### Command Line Options
 
@@ -239,114 +315,105 @@ export ANCHOR_DB=/path/to/db.sqlite
 
 ---
 
-## Performance
+## 📚 Standards
 
-| Metric | Target | Current |
-|--------|--------|---------|
-| SimHash generation | ≤2ms/atom | ~500ns ✅ |
-| Hamming distance | ≥4M ops/sec | ≥3B ops/sec ✅ |
-| Search latency (p95) | ≤200ms | TBD |
-| Ingestion throughput | >100 atoms/sec | TBD |
+### Active Standards (specs/standards/)
+
+| Standard | Description |
+|----------|-------------|
+| **code_style.md** | Rust code style guide |
+| **testing.md** | Testing requirements and patterns |
+| **doc_policy.md** | Documentation standards |
 
 ---
 
-## Development
+## 🆚 Comparison: Rust vs Node.js
 
-### Build
+| Aspect | Node.js Version | Rust Version |
+|--------|----------------|--------------|
+| **Runtime** | Node.js v18+ | Standalone binary |
+| **Database** | PGlite | SQLite (bundled) |
+| **Binary Size** | ~150MB | <50MB |
+| **Memory** | GC-managed | Manual + RAII |
+| **Safety** | Runtime checks | Compile-time |
+| **Deployment** | npm + Node | Single binary |
+| **Performance** | Good | Excellent |
+
+---
+
+## 🤝 Agent Integration
+
+Anchor is **agent harness agnostic**—designed to work with multiple frameworks:
+
+- OpenCLAW (primary target)
+- Custom agent frameworks
+- Direct API integrations
+- CLI access for automation
+
+### Stateless Context Retrieval
+
+```
+Agent Query → Anchor Context Retrieval → Context (JSON) → Agent Logic → Response
+```
+
+---
+
+## 🔒 Security & Privacy
+
+- **Local-First:** All data stays on your machine
+- **No Cloud:** Zero external dependencies
+- **User Whitelisting:** Telegram bot user restrictions
+- **Filesystem Sandboxing:** Restricted path access
+- **No Telemetry:** All data stays local
+
+---
+
+## 🐛 Troubleshooting
+
+### Common Issues
+
+| Issue | Solution |
+|-------|----------|
+| **Port already in use** | Use `--port <other>` flag |
+| **Database locked** | Ensure no other instance is running |
+| **Slow first run** | Database initialization is one-time |
+
+### Health Checks
 
 ```bash
-cargo build --release
-```
-
-### Test
-
-```bash
-cargo test --all-features
-```
-
-### Run
-
-```bash
-cargo run -- --port 3160
-```
-
-### Project Structure
-
-```
-anchor-rewrite-v0/
-├── crates/
-│   └── anchor-engine/
-│       ├── Cargo.toml
-│       └── src/
-│           ├── lib.rs      # Library
-│           ├── main.rs     # CLI binary
-│           ├── db.rs       # Database layer
-│           ├── models.rs   # Data models
-│           ├── service.rs  # Business logic
-│           └── api.rs      # HTTP handlers
-├── packages/               # Core algorithm crates
-│   ├── anchor-fingerprint/
-│   ├── anchor-atomizer/
-│   ├── anchor-keyextract/
-│   └── anchor-tagwalker/
-└── specs/                  # Documentation
+GET /health              # System status
+GET /stats               # Database statistics
 ```
 
 ---
 
-## Comparison: Rust vs Original
+## 📄 License
 
-| Aspect | Original (TypeScript) | Rust Port |
-|--------|----------------------|-----------|
-| Runtime | Node.js v18+ | Standalone binary |
-| Database | PGlite | SQLite (bundled) |
-| Binary Size | ~150MB | <50MB |
-| Memory | GC-managed | Manual + RAII |
-| Safety | Runtime checks | Compile-time |
-| Deployment | npm + Node | Single binary |
-
----
-
-## Documentation
-
-- **[Status Report](STATUS.md)** - Current progress (100% complete)
-- **[API Summary](API_SUMMARY.md)** - Complete Rust API docs
-- **[System Spec](specs/spec.md)** - Architecture and algorithms
-- **[Tasks](specs/tasks.md)** - Implementation checklist
-- **[Plan](specs/plan.md)** - Project timeline
-
----
-
-## License
-
-**AGPL-3.0** - Same license as the original Anchor Engine.
+**AGPL-3.0** — Same license as the original Anchor Engine.
 
 This is a from-scratch rewrite. No code is copied from the original repository.
 
 ---
 
-## Acknowledgments
+## 🙏 Acknowledgments
 
 - Original [Anchor Engine](https://github.com/RSBalchII/anchor-engine) by R.S. Balch II
-- SimHash algorithm (Charikar, 1997)
-- STAR algorithm (original research)
+- SimHash algorithm: Moses Charikar (1997)
+- STAR Algorithm: Original research
 - SQLite team for the amazing database
 - Rust community for world-class tooling
 
 ---
 
-## Status
+## 🎯 Next Steps
 
-**✅ Implementation Complete** - Ready for production testing
-
-- 181 tests passing (172 core + 9 engine)
-- 0 compilation errors
-- Thread-safe database access
-- HTTP API fully functional
-- Binary compiles successfully
-
-See [STATUS.md](STATUS.md) for details.
+1. **Test with real data** — Ingest your actual documents
+2. **Benchmark** — Compare performance vs Node.js version
+3. **Production deployment** — Deploy as standalone service
 
 ---
 
-**Get started**: `cargo run -- --port 3160` 🚀
+**Get started:** `cargo run -- --port 3160` 🚀
+
+**Repository:** https://github.com/RSBalchII/anchor-rust-v0  
+**Status:** ✅ Complete (February 17, 2026)

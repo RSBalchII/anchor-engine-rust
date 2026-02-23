@@ -8,30 +8,56 @@ Documentation is **executable specification**. It should be:
 2. **Actionable**: Tells you exactly what to do
 3. **Living**: Updated with every code change
 4. **Minimal**: No duplication, single source of truth
+5. **Aligned**: Follows anchor-engine-node documentation structure where applicable
 
 ---
 
 ## Directory Structure
 
 ```
-specs/
-├── spec.md           # System specification (THE truth)
-├── tasks.md          # Implementation tasks + status
-├── plan.md           # Project timeline + milestones
-├── CHANGELOG.md      # User-facing changes
-└── standards/
-    ├── code_style.md # Coding standards
-    ├── doc_policy.md # This file
-    └── testing.md    # Testing standards
+anchor-rust-v0/
+├── README.md              # Quick start + overview (links to specs/)
+├── CHANGELOG.md           # Version history (Keep a Changelog format)
+├── Cargo.toml             # Workspace configuration
+├── docs/
+│   ├── WHITEPAPER.md      # References anchor-engine-node whitepaper
+│   └── COMPARISON_WITH_NODE.md  # Architecture comparison
+├── specs/
+│   ├── spec.md            # System specification (THE truth)
+│   ├── tasks.md           # Implementation tasks + status
+│   ├── plan.md            # Project timeline + milestones
+│   └── standards/
+│       ├── README.md      # Standards index
+│       ├── code_style.md  # Coding standards
+│       ├── doc_policy.md  # This file
+│       └── testing.md     # Testing standards
 ```
 
 **Root directory** contains only:
 - `README.md` - Quick start + overview
-- `CHANGELOG.md` - Symlink to specs/CHANGELOG.md
+- `CHANGELOG.md` - User-facing changes
 - `Cargo.toml` - Workspace configuration
 - `start.sh` / `start.bat` - Launch scripts
 
 **No other docs in root.**
+
+### Alignment with anchor-engine-node
+
+This project follows the documentation structure of **anchor-engine-node** where applicable:
+
+| Document Type | anchor-engine-node | anchor-rust-v0 | Status |
+|---------------|-------------------|----------------|--------|
+| **Whitepaper** | docs/whitepaper.md | docs/WHITEPAPER.md (reference) | ✅ Aligned |
+| **Spec** | specs/spec.md | specs/spec.md | ✅ Aligned |
+| **Changelog** | CHANGELOG.md | CHANGELOG.md | ✅ Aligned (Keep a Changelog) |
+| **Standards Index** | specs/standards/README.md | specs/standards/README.md | ✅ Aligned |
+| **Standards** | specs/standards/*.md | specs/standards/*.md | ✅ Aligned |
+| **Comparison** | N/A | docs/COMPARISON_WITH_NODE.md | 🆕 Rust-specific |
+
+**Key Differences:**
+- Rust version references Node.js whitepaper (authoritative source)
+- Rust version includes comparison document (architecture differences)
+- Both use identical STAR Algorithm specification
 
 ---
 
