@@ -76,6 +76,71 @@ fn hash_token(token: &str) -> u64 {
     (hash_128 & 0xFFFF_FFFF_FFFF_FFFF) as u64
 }
 
+/// Compute the 64-bit SimHash fingerprint of raw bytes.
+///
+/// This function hashes bytes directly without UTF-8 validation.
+/// Useful for deduplication where you want to avoid UTF-8 validation
+/// overhead on duplicate blocks.
+///
+/// # Arguments
+///
+/// * `bytes` - Raw byte slice to hash
+///
+/// # Returns
+///
+/// A 64-bit SimHash fingerprint
+///
+/// # Example
+///
+/// ```rust
+/// use anchor_fingerprint::simhash_bytes;
+///
+/// let hash = simhash_bytes(b"Hello, world!");
+/// println!("Hash: {:016x}", hash);
+/// ```
+pub fn simhash_bytes(bytes: &[u8]) -> u64 {
+    // Hash the raw bytes directly using MurmurHash3
+    // No tokenization, no UTF-8 validation
+    use murmur3::murmur3_x64_128;
+    use std::io::Cursor;
+    
+    if bytes.is_empty() {
+        return 0;
+    }
+    
+    // For byte-level hashing, we use a sliding window approach
+    // This captures local structure without requiring UTF-8 validity
+    const WINDOW_SIZE: usize = 8;
+    let mut accumulator = [0i32; 64];
+    
+    // Slide window over bytes
+    for i in 0..bytes.len().saturating_sub(WINDOW_SIZE - 1) {
+        let window = &bytes[i..i + WINDOW_SIZE];
+        let mut cursor = Cursor::new(window);
+        let hash_128: u128 = murmur3_x64_128(&mut cursor, HASH_SEED).unwrap_or(0);
+        let hash = (hash_128 & 0xFFFF_FFFF_FFFF_FFFF) as u64;
+        
+        // Update accumulator for each bit position
+        for bit in 0..64 {
+            if (hash >> bit) & 1 == 1 {
+                accumulator[bit] += 1;
+            } else {
+                accumulator[bit] -= 1;
+            }
+        }
+    }
+    
+    // Convert accumulator to final fingerprint
+    let mut fingerprint: u64 = 0;
+    for bit in 0..64 {
+        if accumulator[bit] > 0 {
+            fingerprint |= 1 << bit;
+        }
+    }
+    
+    fingerprint
+}
+
 /// Compute the 64-bit SimHash fingerprint of a text string.
 ///
 /// This is the main SimHash implementation. It tokenizes the input and

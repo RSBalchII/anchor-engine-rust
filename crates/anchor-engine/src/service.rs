@@ -395,6 +395,200 @@ impl AnchorService {
     pub fn storage(&self) -> &FileSystemStorage {
         &self.storage
     }
+
+    /// Distill: Radial distillation to compress knowledge into Decision Records.
+    ///
+    /// **Zero-Copy Streaming:**
+    /// Content is loaded lazily from Arc<Mmap>, not all at once.
+    /// Blocks are deduplicated via SimHash before assembly.
+    ///
+    /// **Algorithm:**
+    /// 1. Find anchor atoms via seed query (FTS)
+    /// 2. For each anchor, retrieve surrounding atoms within radius hops
+    /// 3. Deduplicate blocks using SimHash
+    /// 4. Group by source proximity for coherent Decision Records
+    /// 5. Write output to distills/ directory
+    pub async fn distill(&self, request: DistillRequest) -> Result<DistillResponse> {
+        use std::collections::{HashMap, HashSet};
+        use std::fs::{self, OpenOptions};
+        use std::io::Write;
+        use anchor_fingerprint::simhash;
+
+        let start = Instant::now();
+
+        info!("🔮 [Distill] Starting radial distillation: seed='{:?}', radius={}",
+              request.seed, request.radius);
+
+        // Pre-allocate collections (avoids dynamic resizing)
+        let mut visited: HashSet<u64> = HashSet::with_capacity(request.max_atoms.unwrap_or(1000));
+        let mut blocks_by_source: HashMap<String, Vec<DistillBlock>> = HashMap::new();
+        let mut seen_hashes: HashSet<u64> = HashSet::with_capacity(500);
+
+        // Step 1: Find anchor atoms via seed query
+        let seed_query = request.seed.as_deref().unwrap_or("#");
+        let anchor_atoms = self.db.search_atoms(seed_query, 100).await?;
+        info!("   └─ Found {} anchor atoms for seed '{}'", anchor_atoms.len(), seed_query);
+
+        // Step 2: For each anchor, retrieve surrounding atoms within radius
+        let mut total_atoms_collected = 0;
+        let max_atoms = request.max_atoms.unwrap_or(1000);
+
+        for anchor in &anchor_atoms {
+            if total_atoms_collected >= max_atoms {
+                break;
+            }
+
+            // BFS to find atoms within radius
+            let mut queue: Vec<(u64, u32)> = vec![(anchor.id, 0)]; // (atom_id, hop_distance)
+            visited.insert(anchor.id);
+
+            while let Some((atom_id, hop)) = queue.pop() {
+                if hop > request.radius || total_atoms_collected >= max_atoms {
+                    continue;
+                }
+
+                // Get atom with lazy content loading
+                let atom = match self.db.get_atom(atom_id).await {
+                    Ok(a) => a,
+                    Err(_) => continue,
+                };
+
+                // Zero-copy content load from filesystem
+                let content_bytes = match self.storage.read_range(&atom.source_path, atom.start_byte, atom.end_byte).await {
+                    Ok(bytes) => bytes,
+                    Err(_) => continue,
+                };
+
+                // CRITICAL: Hash raw bytes FIRST (no UTF-8 validation)
+                // This avoids O(N) UTF-8 scan on duplicate blocks
+                let content_hash = anchor_fingerprint::simhash_bytes(&content_bytes);
+                if !seen_hashes.insert(content_hash) {
+                    continue; // Duplicate - skipped WITHOUT UTF-8 validation
+                }
+
+                // Only validate UTF-8 for UNIQUE blocks (after dedup)
+                let content_str = String::from_utf8_lossy(&content_bytes);
+
+                // Calculate gravity score (damped by hop distance)
+                let damping_factor: f64 = 0.85;
+                let gravity_score = damping_factor.powi(hop as i32);
+
+                // Group by source for coherent assembly
+                blocks_by_source
+                    .entry(atom.source_path.clone())
+                    .or_insert_with(Vec::new)
+                    .push(DistillBlock {
+                        atom_id: atom.id,
+                        content: content_str.to_string(),
+                        hop_distance: hop,
+                        gravity_score,
+                        tags: atom.tags.clone(),
+                        char_start: atom.char_start,
+                        char_end: atom.char_end,
+                    });
+
+                total_atoms_collected += 1;
+
+                // Find neighboring atoms via shared tags
+                let atom_tags = self.db.get_tags_for_atom(atom.id).await.unwrap_or_default();
+                for tag in &atom_tags {
+                    let neighbor_atoms = self.db.get_atoms_by_tag(&tag.tag).await.unwrap_or_default();
+                    for neighbor in &neighbor_atoms {
+                        if visited.insert(neighbor.id) {
+                            queue.push((neighbor.id, hop + 1));
+                        }
+                    }
+                }
+            }
+        }
+
+        info!("   └─ Collected {} unique blocks from {} sources",
+              total_atoms_collected, blocks_by_source.len());
+
+        // Step 4: Assemble Decision Records
+        let distills_dir = PathBuf::from("distills");
+        fs::create_dir_all(&distills_dir)
+            .map_err(|e| crate::db::DbError::Migration(e.to_string()))?;
+
+        // Generate output filename based on seed
+        let timestamp = chrono::Utc::now().format("%Y%m%d_%H%M%S");
+        let seed_safe = seed_query.replace(|c: char| !c.is_alphanumeric(), "_");
+        let output_filename = format!("distill_{}_{}.json", seed_safe, timestamp);
+        let output_path = distills_dir.join(&output_filename);
+
+        // Calculate token counts for compression ratio
+        let mut original_tokens = 0;
+        let mut distilled_tokens = 0;
+
+        // Build output structure
+        let mut decision_records: Vec<DecisionRecord> = Vec::new();
+
+        for (source_path, blocks) in &blocks_by_source {
+            // Sort blocks by char position for coherent narrative
+            let mut sorted_blocks = blocks.clone();
+            sorted_blocks.sort_by_key(|b| b.char_start);
+
+            // Concatenate blocks for this source
+            let mut record_content = String::new();
+            for block in &sorted_blocks {
+                record_content.push_str(&block.content);
+                record_content.push('\n');
+                original_tokens += block.content.split_whitespace().count();
+            }
+            distilled_tokens += record_content.split_whitespace().count();
+
+            decision_records.push(DecisionRecord {
+                source: source_path.clone(),
+                content: record_content,
+                blocks: sorted_blocks.len(),
+                total_hops: sorted_blocks.iter().map(|b| b.hop_distance).max().unwrap_or(0),
+            });
+        }
+
+        // Step 5: Write output to distills/ directory
+        let output_json = serde_json::to_string_pretty(&DecisionRecordsOutput {
+            seed: seed_query.to_string(),
+            radius: request.radius,
+            total_atoms: total_atoms_collected,
+            total_sources: blocks_by_source.len(),
+            compression_ratio: if original_tokens > 0 {
+                distilled_tokens as f64 / original_tokens as f64
+            } else {
+                1.0
+            },
+            records: decision_records,
+            duration_ms: start.elapsed().as_millis() as f64,
+        })?;
+
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(&output_path)
+            .map_err(|e| crate::db::DbError::Migration(e.to_string()))?;
+
+        file.write_all(output_json.as_bytes())
+            .map_err(|e| crate::db::DbError::Migration(e.to_string()))?;
+
+        let duration = start.elapsed().as_millis() as f64;
+
+        info!("   └─ ✅ COMPLETE: {} records, {} compression ratio in {:.1}ms",
+              decision_records.len(),
+              if original_tokens > 0 { format!("{:.1}%", (distilled_tokens as f64 / original_tokens as f64) * 100.0) } else { "N/A".to_string() },
+              duration);
+
+        Ok(DistillResponse {
+            output_path: output_path.to_string_lossy().to_string(),
+            compression_ratio: if original_tokens > 0 {
+                distilled_tokens as f64 / original_tokens as f64
+            } else {
+                1.0
+            },
+            total_atoms: total_atoms_collected,
+            total_sources: blocks_by_source.len(),
+            duration_ms: duration,
+        })
+    }
 }
 
 #[cfg(test)]

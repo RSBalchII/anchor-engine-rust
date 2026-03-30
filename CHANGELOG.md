@@ -198,6 +198,35 @@ let service = AnchorService::new(db, mirror_dir)?;
 | Memory (idle) | <100MB | ~600MB | 6x reduction |
 | Heap allocs during BFS | 0 | ~1000s | Zero-copy |
 
+#### Added
+
+**New MCP Tool:** `anchor_distill` - Radial distillation (FULLY IMPLEMENTED)
+- Seed-based radial retrieval (configurable radius)
+- SimHash deduplication of content blocks
+- Zero-copy streaming from Arc<Mmap> (no heap allocations)
+- Pre-allocated collections (HashSet with_capacity)
+- Decision Records output (JSON format)
+- Compression ratio metrics
+
+**New Service Method:** `AnchorService::distill()`
+- BFS traversal within radius hops
+- Groups blocks by source for coherent narrative
+- Writes to `distills/` directory
+- Returns: output_path, compression_ratio, total_atoms, total_sources
+
+**New Models:**
+- `DistillRequest` - seed, radius, max_atoms
+- `DistillResponse` - output_path, compression_ratio, duration_ms
+- `DistillBlock` - Internal block structure
+- `DecisionRecord` - Grouped by source
+- `DecisionRecordsOutput` - Full JSON output structure
+
+#### Changed
+
+**MCP Server:**
+- `handle_distill()` now calls `service.distill()` (was stub)
+- Returns full distillation results with compression metrics
+
 ---
 
 ## [0.2.0] - 2026-03-30 — MCP Server Implementation

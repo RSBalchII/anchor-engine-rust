@@ -35,6 +35,7 @@ mod simhash;
 mod distance;
 
 pub use simhash::simhash;
+pub use simhash::simhash_bytes;
 pub use simhash::simhash_with_tokens;
 pub use simhash::tokenize;
 pub use distance::hamming_distance;

@@ -353,6 +353,80 @@ pub struct IlluminateResponse {
     pub duration_ms: f64,
 }
 
+/// Distill request (radial distillation).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DistillRequest {
+    /// Seed query (None = distill all)
+    pub seed: Option<String>,
+    /// Radial hop distance (default: 2)
+    #[serde(default = "default_radius")]
+    pub radius: u32,
+    /// Maximum atoms to collect (default: 1000)
+    #[serde(default = "default_max_atoms")]
+    pub max_atoms: Option<usize>,
+}
+
+fn default_radius() -> u32 { 2 }
+fn default_max_atoms() -> usize { 1000 }
+
+impl Default for DistillRequest {
+    fn default() -> Self {
+        Self {
+            seed: None,
+            radius: default_radius(),
+            max_atoms: Some(default_max_atoms()),
+        }
+    }
+}
+
+/// Internal distillation block.
+#[derive(Debug, Clone)]
+pub struct DistillBlock {
+    pub atom_id: u64,
+    pub content: String,
+    pub hop_distance: u32,
+    pub gravity_score: f64,
+    pub tags: Vec<String>,
+    pub char_start: usize,
+    pub char_end: usize,
+}
+
+/// Decision record (grouped by source).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DecisionRecord {
+    pub source: String,
+    pub content: String,
+    pub blocks: usize,
+    pub total_hops: u32,
+}
+
+/// Distillation output structure.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DecisionRecordsOutput {
+    pub seed: String,
+    pub radius: u32,
+    pub total_atoms: usize,
+    pub total_sources: usize,
+    pub compression_ratio: f64,
+    pub records: Vec<DecisionRecord>,
+    pub duration_ms: f64,
+}
+
+/// Distill response.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DistillResponse {
+    /// Output file path
+    pub output_path: String,
+    /// Compression ratio (distilled/original)
+    pub compression_ratio: f64,
+    /// Total atoms collected
+    pub total_atoms: usize,
+    /// Total sources processed
+    pub total_sources: usize,
+    /// Duration in milliseconds
+    pub duration_ms: f64,
+}
+
 /// Ingestion response.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IngestResponse {

@@ -221,20 +221,30 @@ impl McpServer {
         };
 
         let service = self.service.lock().await;
-        
-        // Note: The actual distill implementation would go here
-        // For now, return a placeholder response
-        JsonRpcResponse {
-            jsonrpc: "2.0".to_string(),
-            id: id.clone(),
-            result: Some(json!({
-                "output_path": null,
-                "compression_ratio": null,
-                "lines_unique": 0,
-                "duration_ms": 0,
-                "message": "Distillation not yet implemented in Rust version"
-            })),
-            error: None,
+
+        // Call the distill service method
+        let distill_request = DistillRequest {
+            seed: params.seed,
+            radius: params.radius,
+            max_atoms: None,
+        };
+
+        match service.distill(distill_request).await {
+            Ok(response) => {
+                JsonRpcResponse {
+                    jsonrpc: "2.0".to_string(),
+                    id: id.clone(),
+                    result: Some(json!({
+                        "output_path": response.output_path,
+                        "compression_ratio": response.compression_ratio,
+                        "total_atoms": response.total_atoms,
+                        "total_sources": response.total_sources,
+                        "duration_ms": response.duration_ms,
+                    })),
+                    error: None,
+                }
+            }
+            Err(e) => self.error_response(id, APPLICATION_ERROR, &e.to_string()),
         }
     }
 

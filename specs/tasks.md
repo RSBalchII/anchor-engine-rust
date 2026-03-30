@@ -76,11 +76,12 @@
 - [x] Create pointer_only_integration.rs test suite (7 tests)
 
 ### Phase 4: MCP Tools Completion ✅
-- [x] Implement anchor_distill full functionality
-- [x] Implement anchor_illuminate full functionality
+- [x] Implement anchor_distill full functionality (radial distillation)
+- [x] Implement anchor_illuminate full functionality (BFS traversal)
 - [x] Test MCP tools with pointer-only storage
 - [x] Add pre-allocation with_capacity() for BFS (zero reallocations)
 - [x] Add illuminate integration tests (3 tests)
+- [x] Zero-copy streaming for distill (Arc<Mmap>)
 
 ### Phase 5: Benchmarking ✅
 - [x] Create benchmark suite (criterion)
