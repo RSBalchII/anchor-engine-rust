@@ -1,19 +1,32 @@
 //! Data models for Anchor Engine.
+//!
+//! **Pointer-Only Storage Pattern:**
+//! - Atoms store `source_path`, `start_byte`, `end_byte` (not content)
+//! - Content is lazily loaded from filesystem on demand
+//! - Database is an index, filesystem is source of truth
 
 use serde::{Deserialize, Serialize};
 
 /// An Atom is the smallest unit of knowledge.
+/// 
+/// **Pointer-Only Storage:**
+/// This struct stores pointers to content in the filesystem, not the content itself.
+/// Use `Storage::read_range()` to retrieve content when needed.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Atom {
     /// Unique atom ID (assigned by database)
     pub id: u64,
     /// Source document ID
     pub source_id: String,
-    /// Text content
-    pub content: String,
-    /// Character offset where the atom starts in the original source
+    /// Path to the source file in mirrored_brain/
+    pub source_path: String,
+    /// Byte offset where the atom starts in the source file
+    pub start_byte: usize,
+    /// Byte offset where the atom ends in the source file (exclusive)
+    pub end_byte: usize,
+    /// Character offset where the atom starts in the original source (for provenance)
     pub char_start: usize,
-    /// Character offset where the atom ends in the original source
+    /// Character offset where the atom ends in the original source (for provenance)
     pub char_end: usize,
     /// Unix timestamp (creation time)
     pub timestamp: f64,
@@ -25,6 +38,52 @@ pub struct Atom {
     /// Optional metadata
     #[serde(skip_serializing_if = "Option::is_none")]
     pub metadata: Option<serde_json::Value>,
+    /// Cached content (optional, not stored in database)
+    /// This field is populated on-demand when content is read from filesystem
+    #[serde(skip_serializing, skip_deserializing, default)]
+    pub content: Option<String>,
+}
+
+impl Atom {
+    /// Create a new atom with pointer-only storage
+    pub fn new(
+        source_id: String,
+        source_path: String,
+        start_byte: usize,
+        end_byte: usize,
+        char_start: usize,
+        char_end: usize,
+        simhash: u64,
+    ) -> Self {
+        Self {
+            id: 0, // Will be assigned by database
+            source_id,
+            source_path,
+            start_byte,
+            end_byte,
+            char_start,
+            char_end,
+            timestamp: chrono::Utc::now().timestamp() as f64,
+            simhash,
+            tags: Vec::new(),
+            metadata: None,
+            content: None,
+        }
+    }
+    
+    /// Get the content of this atom, loading from filesystem if not cached
+    pub fn get_content(&mut self, storage: &dyn crate::storage::Storage) -> crate::db::Result<&str> {
+        if let Some(ref content) = self.content {
+            return Ok(content);
+        }
+        
+        // Load from filesystem
+        let content = storage.read_range(&self.source_path, self.start_byte, self.end_byte)
+            .map_err(|e| crate::db::Error::DatabaseError(e.to_string()))?;
+        
+        self.content = Some(content);
+        Ok(self.content.as_ref().unwrap())
+    }
 }
 
 /// A Source document (file, commit, etc.).
@@ -226,6 +285,72 @@ impl Default for IngestOptions {
             sanitize: true,
         }
     }
+}
+
+/// Illuminate request (BFS graph traversal).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IlluminateRequest {
+    /// Seed query to find anchor atoms
+    pub seed: String,
+    /// Maximum hop distance (default: 2)
+    #[serde(default = "default_depth")]
+    pub depth: u32,
+    /// Maximum nodes to return (default: 50)
+    #[serde(default = "default_max_nodes")]
+    pub max_nodes: usize,
+}
+
+fn default_depth() -> u32 { 2 }
+fn default_max_nodes() -> usize { 50 }
+
+impl Default for IlluminateRequest {
+    fn default() -> Self {
+        Self {
+            seed: String::new(),
+            depth: default_depth(),
+            max_nodes: default_max_nodes(),
+        }
+    }
+}
+
+/// Internal BFS queue node.
+#[derive(Debug, Clone)]
+struct IlluminateNode {
+    atom_id: u64,
+    hop_distance: u32,
+    gravity_score: f64,
+}
+
+/// Illuminate result item.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IlluminateResultItem {
+    /// Atom ID
+    pub id: u64,
+    /// Source file path
+    pub source_path: String,
+    /// Content (loaded from filesystem)
+    pub content: String,
+    /// Associated tags
+    pub tags: Vec<String>,
+    /// Hop distance from seed
+    pub hop_distance: u32,
+    /// Gravity score (damped by hop distance)
+    pub gravity_score: f64,
+    /// SimHash fingerprint
+    pub simhash: u64,
+}
+
+/// Illuminate response.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IlluminateResponse {
+    /// Illuminated nodes
+    pub nodes: Vec<IlluminateResultItem>,
+    /// Total nodes returned
+    pub total: usize,
+    /// Nodes explored during traversal
+    pub nodes_explored: usize,
+    /// Duration in milliseconds
+    pub duration_ms: f64,
 }
 
 /// Ingestion response.

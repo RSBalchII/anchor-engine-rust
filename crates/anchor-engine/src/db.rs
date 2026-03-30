@@ -1,6 +1,12 @@
 //! Database module for Anchor Engine.
 //!
 //! Provides SQLite storage for atoms, tags, and sources with full CRUD operations.
+//! 
+//! **Pointer-Only Storage Pattern:**
+//! - Atoms store `source_path`, `start_byte`, `end_byte` (not content)
+//! - Content resides in filesystem (`mirrored_brain/`)
+//! - Database is an index, filesystem is source of truth
+//! - FTS index on source_path for search (content loaded lazily)
 
 use rusqlite::{Connection, params};
 use std::path::Path;
@@ -77,12 +83,14 @@ impl Database {
             [],
         )?;
 
-        // Create atoms table
+        // Create atoms table with pointer-only storage
         conn.execute(
             "CREATE TABLE IF NOT EXISTS atoms (
                 id INTEGER PRIMARY KEY,
                 source_id TEXT NOT NULL,
-                content TEXT NOT NULL,
+                source_path TEXT NOT NULL,
+                start_byte INTEGER NOT NULL,
+                end_byte INTEGER NOT NULL,
                 char_start INTEGER NOT NULL,
                 char_end INTEGER NOT NULL,
                 timestamp REAL NOT NULL,
@@ -111,6 +119,17 @@ impl Database {
             [],
         )?;
 
+        // Index for pointer lookups
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_atoms_source_path ON atoms(source_path)",
+            [],
+        )?;
+
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_atoms_byte_range ON atoms(start_byte, end_byte)",
+            [],
+        )?;
+
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_atoms_simhash ON atoms(simhash)",
             [],
@@ -126,38 +145,40 @@ impl Database {
             [],
         )?;
 
-        // Create FTS index for atoms content
+        // Create FTS index for source_path (not content - content is in filesystem)
         conn.execute(
             "CREATE VIRTUAL TABLE IF NOT EXISTS atoms_fts USING fts5(
-                content,
+                source_path,
                 content='atoms',
                 content_rowid='id'
             )",
             [],
         )?;
 
-        // Create triggers to keep FTS in sync
+        // Create triggers to keep FTS in sync with source_path
         conn.execute(
             "CREATE TRIGGER IF NOT EXISTS atoms_ai AFTER INSERT ON atoms BEGIN
-                INSERT INTO atoms_fts(rowid, content) VALUES (new.id, new.content);
+                INSERT INTO atoms_fts(rowid, source_path) VALUES (new.id, new.source_path);
             END",
             [],
         )?;
 
         conn.execute(
             "CREATE TRIGGER IF NOT EXISTS atoms_ad AFTER DELETE ON atoms BEGIN
-                INSERT INTO atoms_fts(atoms_fts, rowid, content) VALUES('delete', old.id, old.content);
+                INSERT INTO atoms_fts(atoms_fts, rowid, source_path) VALUES('delete', old.id, old.source_path);
             END",
             [],
         )?;
 
         conn.execute(
             "CREATE TRIGGER IF NOT EXISTS atoms_au AFTER UPDATE ON atoms BEGIN
-                INSERT INTO atoms_fts(atoms_fts, rowid, content) VALUES('delete', old.id, old.content);
-                INSERT INTO atoms_fts(rowid, content) VALUES (new.id, new.content);
+                INSERT INTO atoms_fts(atoms_fts, rowid, source_path) VALUES('delete', old.id, old.source_path);
+                INSERT INTO atoms_fts(rowid, source_path) VALUES (new.id, new.source_path);
             END",
             [],
         )?;
+
+        info!("✅ Database schema initialized (pointer-only storage)");
 
         Ok(())
     }
@@ -238,15 +259,17 @@ impl Database {
 
     // ==================== Atom Operations ====================
 
-    /// Insert an atom.
+    /// Insert an atom with pointer-only storage.
     pub async fn insert_atom(&self, atom: &Atom) -> Result<u64> {
         let conn = self.conn.lock().await;
         conn.execute(
-            "INSERT INTO atoms (source_id, content, char_start, char_end, timestamp, simhash, metadata)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            "INSERT INTO atoms (source_id, source_path, start_byte, end_byte, char_start, char_end, timestamp, simhash, metadata)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             params![
                 atom.source_id,
-                atom.content,
+                atom.source_path,
+                atom.start_byte,
+                atom.end_byte,
                 atom.char_start,
                 atom.char_end,
                 atom.timestamp,
@@ -259,7 +282,7 @@ impl Database {
         Ok(id)
     }
 
-    /// Insert multiple atoms in a transaction.
+    /// Insert multiple atoms in a transaction with pointer-only storage.
     pub async fn insert_atoms_batch(&self, atoms: &[Atom]) -> Result<Vec<u64>> {
         // 📊 DEBUG log for batch operations
         debug!("📊 Batch insert: {} atoms", atoms.len());
@@ -270,11 +293,13 @@ impl Database {
 
         for atom in atoms {
             tx.execute(
-                "INSERT INTO atoms (source_id, content, char_start, char_end, timestamp, simhash, metadata)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                "INSERT INTO atoms (source_id, source_path, start_byte, end_byte, char_start, char_end, timestamp, simhash, metadata)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
                 params![
                     atom.source_id,
-                    atom.content,
+                    atom.source_path,
+                    atom.start_byte,
+                    atom.end_byte,
                     atom.char_start,
                     atom.char_end,
                     atom.timestamp,
@@ -286,75 +311,82 @@ impl Database {
         }
 
         tx.commit()?;
-        debug!("   └─ ✓ Batch insert complete: {} atoms stored", ids.len());
+        debug!("   └─ ✓ Batch insert complete: {} atoms stored (pointer-only)", ids.len());
         Ok(ids)
     }
 
-    /// Get an atom by ID.
+    /// Get an atom by ID with pointer-only storage.
     pub async fn get_atom(&self, id: u64) -> Result<Atom> {
         let conn = self.conn.lock().await;
         let mut stmt = conn.prepare(
-            "SELECT id, source_id, content, char_start, char_end, timestamp, simhash, metadata
+            "SELECT id, source_id, source_path, start_byte, end_byte, char_start, char_end, timestamp, simhash, metadata
              FROM atoms WHERE id = ?1",
         )?;
 
         let atom = stmt.query_row(params![id], |row| {
-            let simhash_str: String = row.get(6)?;
+            let simhash_str: String = row.get(8)?;
             let simhash = u64::from_str_radix(&simhash_str.trim_start_matches("0x"), 16)
                 .unwrap_or(0);
 
-            let metadata: Option<String> = row.get(7)?;
+            let metadata: Option<String> = row.get(9)?;
             Ok(Atom {
                 id: row.get(0)?,
                 source_id: row.get(1)?,
-                content: row.get(2)?,
-                char_start: row.get(3)?,
-                char_end: row.get(4)?,
-                timestamp: row.get(5)?,
+                source_path: row.get(2)?,
+                start_byte: row.get(3)?,
+                end_byte: row.get(4)?,
+                char_start: row.get(5)?,
+                char_end: row.get(6)?,
+                timestamp: row.get(7)?,
                 simhash,
                 tags: Vec::new(),
                 metadata: metadata.and_then(|m| serde_json::from_str(&m).ok()),
+                content: None, // Content loaded lazily on demand
             })
         })?;
 
         Ok(atom)
     }
 
-    /// Get atoms by source ID.
+    /// Get atoms by source ID with pointer-only storage.
     pub async fn get_atoms_by_source(&self, source_id: &str) -> Result<Vec<Atom>> {
         let conn = self.conn.lock().await;
         let mut stmt = conn.prepare(
-            "SELECT id, source_id, content, char_start, char_end, timestamp, simhash, metadata
+            "SELECT id, source_id, source_path, start_byte, end_byte, char_start, char_end, timestamp, simhash, metadata
              FROM atoms WHERE source_id = ?1",
         )?;
 
         let atoms = stmt.query_map(params![source_id], |row| {
-            let simhash_str: String = row.get(6)?;
+            let simhash_str: String = row.get(8)?;
             let simhash = u64::from_str_radix(&simhash_str.trim_start_matches("0x"), 16)
                 .unwrap_or(0);
 
-            let metadata: Option<String> = row.get(7)?;
+            let metadata: Option<String> = row.get(9)?;
             Ok(Atom {
                 id: row.get(0)?,
                 source_id: row.get(1)?,
-                content: row.get(2)?,
-                char_start: row.get(3)?,
-                char_end: row.get(4)?,
-                timestamp: row.get(5)?,
+                source_path: row.get(2)?,
+                start_byte: row.get(3)?,
+                end_byte: row.get(4)?,
+                char_start: row.get(5)?,
+                char_end: row.get(6)?,
+                timestamp: row.get(7)?,
                 simhash,
                 tags: Vec::new(),
                 metadata: metadata.and_then(|m| serde_json::from_str(&m).ok()),
+                content: None, // Content loaded lazily on demand
             })
         })?;
 
         atoms.collect::<rusqlite::Result<Vec<_>>>().map_err(DbError::from)
     }
 
-    /// Search atoms by content (FTS).
+    /// Search atoms by source_path (FTS) with pointer-only storage.
+    /// Content is loaded lazily from filesystem after search.
     pub async fn search_atoms(&self, query: &str, limit: usize) -> Result<Vec<Atom>> {
         let conn = self.conn.lock().await;
         let mut stmt = conn.prepare(
-            "SELECT a.id, a.source_id, a.content, a.char_start, a.char_end, a.timestamp, a.simhash, a.metadata
+            "SELECT a.id, a.source_id, a.source_path, a.start_byte, a.end_byte, a.char_start, a.char_end, a.timestamp, a.simhash, a.metadata
              FROM atoms a
              JOIN atoms_fts fts ON a.id = fts.rowid
              WHERE atoms_fts MATCH ?1
@@ -363,21 +395,24 @@ impl Database {
         )?;
 
         let atoms = stmt.query_map(params![query, limit], |row| {
-            let simhash_str: String = row.get(6)?;
+            let simhash_str: String = row.get(8)?;
             let simhash = u64::from_str_radix(&simhash_str.trim_start_matches("0x"), 16)
                 .unwrap_or(0);
 
-            let metadata: Option<String> = row.get(7)?;
+            let metadata: Option<String> = row.get(9)?;
             Ok(Atom {
                 id: row.get(0)?,
                 source_id: row.get(1)?,
-                content: row.get(2)?,
-                char_start: row.get(3)?,
-                char_end: row.get(4)?,
-                timestamp: row.get(5)?,
+                source_path: row.get(2)?,
+                start_byte: row.get(3)?,
+                end_byte: row.get(4)?,
+                char_start: row.get(5)?,
+                char_end: row.get(6)?,
+                timestamp: row.get(7)?,
                 simhash,
                 tags: Vec::new(),
                 metadata: metadata.and_then(|m| serde_json::from_str(&m).ok()),
+                content: None, // Content loaded lazily on demand
             })
         })?;
 
@@ -427,32 +462,35 @@ impl Database {
         tags.collect::<rusqlite::Result<Vec<_>>>().map_err(DbError::from)
     }
 
-    /// Get atoms by tag.
+    /// Get atoms by tag with pointer-only storage.
     pub async fn get_atoms_by_tag(&self, tag: &str) -> Result<Vec<Atom>> {
         let conn = self.conn.lock().await;
         let mut stmt = conn.prepare(
-            "SELECT a.id, a.source_id, a.content, a.char_start, a.char_end, a.timestamp, a.simhash, a.metadata
+            "SELECT a.id, a.source_id, a.source_path, a.start_byte, a.end_byte, a.char_start, a.char_end, a.timestamp, a.simhash, a.metadata
              FROM atoms a
              JOIN tags t ON a.id = t.atom_id
              WHERE t.tag = ?1",
         )?;
 
         let atoms = stmt.query_map(params![tag], |row| {
-            let simhash_str: String = row.get(6)?;
+            let simhash_str: String = row.get(8)?;
             let simhash = u64::from_str_radix(&simhash_str.trim_start_matches("0x"), 16)
                 .unwrap_or(0);
 
-            let metadata: Option<String> = row.get(7)?;
+            let metadata: Option<String> = row.get(9)?;
             Ok(Atom {
                 id: row.get(0)?,
                 source_id: row.get(1)?,
-                content: row.get(2)?,
-                char_start: row.get(3)?,
-                char_end: row.get(4)?,
-                timestamp: row.get(5)?,
+                source_path: row.get(2)?,
+                start_byte: row.get(3)?,
+                end_byte: row.get(4)?,
+                char_start: row.get(5)?,
+                char_end: row.get(6)?,
+                timestamp: row.get(7)?,
                 simhash,
                 tags: Vec::new(),
                 metadata: metadata.and_then(|m| serde_json::from_str(&m).ok()),
+                content: None, // Content loaded lazily on demand
             })
         })?;
 
@@ -467,30 +505,33 @@ impl Database {
         tags.collect::<rusqlite::Result<Vec<_>>>().map_err(DbError::from)
     }
 
-    /// Get all atoms (for synonym generation).
+    /// Get all atoms (for synonym generation) with pointer-only storage.
     pub async fn get_all_atoms(&self) -> Result<Vec<crate::models::Atom>> {
         let conn = self.conn.lock().await;
         let mut stmt = conn.prepare(
-            "SELECT id, source_id, content, char_start, char_end, timestamp, simhash, metadata 
+            "SELECT id, source_id, source_path, start_byte, end_byte, char_start, char_end, timestamp, simhash, metadata
              FROM atoms"
         )?;
-        
+
         let atoms = stmt.query_map([], |row| {
-            let simhash_str: String = row.get(6)?;
+            let simhash_str: String = row.get(8)?;
             let simhash = u64::from_str_radix(&simhash_str.trim_start_matches("0x"), 16)
                 .unwrap_or(0);
-            
-            let metadata: Option<String> = row.get(7)?;
+
+            let metadata: Option<String> = row.get(9)?;
             Ok(crate::models::Atom {
                 id: row.get(0)?,
                 source_id: row.get(1)?,
-                content: row.get(2)?,
-                char_start: row.get(3)?,
-                char_end: row.get(4)?,
-                timestamp: row.get(5)?,
+                source_path: row.get(2)?,
+                start_byte: row.get(3)?,
+                end_byte: row.get(4)?,
+                char_start: row.get(5)?,
+                char_end: row.get(6)?,
+                timestamp: row.get(7)?,
                 simhash,
                 tags: Vec::new(),  // Will be populated separately
                 metadata: metadata.and_then(|m| serde_json::from_str(&m).ok()),
+                content: None, // Content loaded lazily on demand
             })
         })?;
         
@@ -590,9 +631,9 @@ impl Database {
         // Delete existing FTS entries
         conn.execute("DELETE FROM atoms_fts", [])?;
 
-        // Rebuild from atoms table
+        // Rebuild from atoms table (source_path only - content is in filesystem)
         conn.execute(
-            "INSERT INTO atoms_fts(rowid, content) SELECT id, content FROM atoms",
+            "INSERT INTO atoms_fts(rowid, source_path) SELECT id, source_path FROM atoms",
             [],
         )?;
 
@@ -656,23 +697,45 @@ mod tests {
         };
         db.upsert_source(&source).await.unwrap();
 
-        // Create atom
+        // Create atom with pointer-only storage
+    #[tokio::test]
+    async fn test_atom_operations() {
+        let db = Database::in_memory().unwrap();
+
+        // Create source first
+        let source = Source {
+            id: "source-1".to_string(),
+            path: "/test.md".to_string(),
+            bucket: None,
+            created_at: Utc::now().timestamp() as f64,
+            updated_at: Utc::now().timestamp() as f64,
+            metadata: None,
+        };
+        db.upsert_source(&source).await.unwrap();
+
+        // Create atom with pointer-only storage
         let atom = Atom {
-            id: 0, // Will be assigned by DB
+            id: 0,
             source_id: "source-1".to_string(),
-            content: "Test content".to_string(),
+            source_path: "/mirrored_brain/test.md".to_string(),
+            start_byte: 0,
+            end_byte: 12,
             char_start: 0,
             char_end: 12,
             timestamp: Utc::now().timestamp() as f64,
             simhash: 0x1234567890ABCDEF,
+            tags: Vec::new(),
             metadata: None,
+            content: None,
         };
 
         let id = db.insert_atom(&atom).await.unwrap();
         assert!(id > 0);
 
         let retrieved = db.get_atom(id).await.unwrap();
-        assert_eq!(retrieved.content, "Test content");
+        assert_eq!(retrieved.source_path, "/mirrored_brain/test.md");
+        assert_eq!(retrieved.start_byte, 0);
+        assert_eq!(retrieved.end_byte, 12);
     }
 
     #[tokio::test]
@@ -693,12 +756,16 @@ mod tests {
         let atom = Atom {
             id: 0,
             source_id: "source-1".to_string(),
-            content: "Test".to_string(),
+            source_path: "/mirrored_brain/test.md".to_string(),
+            start_byte: 0,
+            end_byte: 4,
             char_start: 0,
             char_end: 4,
             timestamp: Utc::now().timestamp() as f64,
             simhash: 0x1234567890ABCDEF,
+            tags: Vec::new(),
             metadata: None,
+            content: None,
         };
         let atom_id = db.insert_atom(&atom).await.unwrap();
 

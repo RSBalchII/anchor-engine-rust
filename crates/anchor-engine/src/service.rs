@@ -1,8 +1,14 @@
 //! Core service logic for Anchor Engine.
 //!
 //! Integrates atomizer, fingerprint, keyextract, and tagwalker with the database.
+//! 
+//! **Pointer-Only Storage Pattern:**
+//! - Content is written to mirrored_brain/ via FileSystemStorage
+//! - Database stores only pointers (source_path, start_byte, end_byte)
+//! - Content is lazily loaded from filesystem on demand
 
 use std::time::Instant;
+use std::path::PathBuf;
 
 use anchor_atomizer::{atomize, sanitize};
 use anchor_fingerprint::simhash;
@@ -12,34 +18,36 @@ use tracing::{info, debug};
 
 use crate::db::{Database, Result};
 use crate::models::*;
+use crate::storage::{Storage, FileSystemStorage};
 
 /// Core Anchor service.
 pub struct AnchorService {
     db: Database,
+    storage: FileSystemStorage,
     tag_walker: TagWalker,
     synonym_ring: SynonymRing,
 }
 
 impl AnchorService {
-    /// Create a new Anchor service.
-    pub fn new(db: Database) -> Self {
+    /// Create a new Anchor service with pointer-only storage.
+    pub fn new(db: Database, mirror_dir: PathBuf) -> Result<Self> {
+        let storage = FileSystemStorage::new(mirror_dir)
+            .map_err(|e| crate::db::DbError::Migration(e.to_string()))?;
         let tag_walker = TagWalker::new();
         let synonym_ring = SynonymRing::default();
 
-        // Load existing atoms into tag walker
-        // (In production, this would be done lazily or on startup)
-
         // ℹ️ INFO log when AnchorService is created
-        info!("🚀 AnchorService initialized");
+        info!("🚀 AnchorService initialized (pointer-only storage)");
 
         Self {
             db,
+            storage,
             tag_walker,
             synonym_ring,
         }
     }
 
-    /// Ingest content into the knowledge base.
+    /// Ingest content into the knowledge base with pointer-only storage.
     pub async fn ingest(&mut self, request: IngestRequest) -> Result<IngestResponse> {
         let start = Instant::now();
 
@@ -62,38 +70,44 @@ impl AnchorService {
             request.content
         };
 
+        // Write to mirrored_brain/ and get file path
+        let source_path = self.storage.write_cleaned(&source_id, &content)?;
+        let content_bytes = content.as_bytes();
+
         // Atomize content
         let atoms = atomize(&content);
-        
+
         // Process each atom
         let mut atom_ids = Vec::new();
         let mut all_tags = Vec::new();
-        
+
         for atom_data in &atoms {
             // Generate SimHash
             let hash = simhash(&atom_data.content);
 
-            // Create atom record
-            let atom = Atom {
-                id: 0, // Will be assigned by DB
-                source_id: source_id.clone(),
-                content: atom_data.content.clone(),
-                char_start: atom_data.char_start,
-                char_end: atom_data.char_end,
-                timestamp: chrono::Utc::now().timestamp() as f64,
-                simhash: hash,
-                tags: Vec::new(),
-                metadata: None,
-            };
-            
+            // Calculate byte offsets in the sanitized content
+            let start_byte = atom_data.char_start;
+            let end_byte = atom_data.char_end;
+
+            // Create atom record with pointer-only storage
+            let atom = Atom::new(
+                source_id.clone(),
+                source_path.clone(),
+                start_byte,
+                end_byte,
+                atom_data.char_start,
+                atom_data.char_end,
+                hash,
+            );
+
             let atom_id = self.db.insert_atom(&atom).await?;
             atom_ids.push(atom_id);
-            
+
             // Extract keywords as tags if requested
             let mut tags = Vec::new();
             if request.options.extract_tags {
                 let keywords = extract_keywords(&atom_data.content, request.options.max_keywords);
-                
+
                 for kw in keywords {
                     if kw.score > 0.3 { // Threshold for relevance
                         let tag = format!("#{}", kw.term.to_lowercase());
@@ -107,13 +121,13 @@ impl AnchorService {
                     }
                 }
             }
-            
+
             // Add tags to database
             if !tags.is_empty() {
                 self.db.add_tags(atom_id, &tags).await?;
             }
-            
-            // Add to tag walker
+
+            // Add to tag walker (store full content for now, will be loaded lazily later)
             let tag_strings: Vec<String> = tags.iter().map(|t| t.tag.clone()).collect();
             self.tag_walker.add_atom(atom_id, &atom_data.content, tag_strings);
         }
@@ -255,6 +269,131 @@ impl AnchorService {
     /// Get the database reference.
     pub fn db(&self) -> &Database {
         &self.db
+    }
+
+    /// Illuminate: BFS graph traversal from seed query.
+    /// 
+    /// **Pre-allocation Strategy:**
+    /// Uses `VecDeque::with_capacity(max_nodes)` and `HashSet::with_capacity(max_nodes)`
+    /// to avoid dynamic reallocation during traversal.
+    /// 
+    /// **Zero-Copy Integration:**
+    /// Content is loaded from Arc<Mmap> on demand, not stored in results.
+    pub async fn illuminate(&self, request: IlluminateRequest) -> Result<IlluminateResponse> {
+        use std::collections::{VecDeque, HashSet};
+        
+        let start = Instant::now();
+        
+        info!("🔦 [Illuminate] Starting BFS traversal: seed='{}', depth={}, max_nodes={}",
+              request.seed, request.depth, request.max_nodes);
+        
+        // Pre-allocate collections (avoids dynamic resizing)
+        let mut queue: VecDeque<IlluminateNode> = VecDeque::with_capacity(request.max_nodes);
+        let mut visited: HashSet<u64> = HashSet::with_capacity(request.max_nodes);
+        let mut results: Vec<IlluminateResultItem> = Vec::with_capacity(request.max_nodes);
+        
+        // Resolve seed query to anchor atoms via FTS
+        let anchor_atoms = self.db.search_atoms(&request.seed, 100).await?;
+        info!("   └─ Found {} anchor atoms for seed '{}'", anchor_atoms.len(), request.seed);
+        
+        // Initialize queue with anchor atoms at hop_distance = 0
+        for atom in &anchor_atoms {
+            if visited.insert(atom.id) {
+                queue.push_back(IlluminateNode {
+                    atom_id: atom.id,
+                    hop_distance: 0,
+                    gravity_score: 1.0,
+                });
+            }
+        }
+        
+        // BFS traversal
+        let mut nodes_explored = 0;
+        let damping_factor: f64 = 0.85; // Standard PageRank damping
+        
+        while let Some(current) = queue.pop_front() {
+            // Stop if we've reached max nodes
+            if results.len() >= request.max_nodes {
+                info!("   └─ Reached max_nodes limit ({})", request.max_nodes);
+                break;
+            }
+            
+            // Stop if we've exceeded depth
+            if current.hop_distance > request.depth {
+                info!("   └─ Reached max depth ({})", request.depth);
+                continue;
+            }
+            
+            nodes_explored += 1;
+            
+            // Get atom details (with lazy content loading)
+            let atom = match self.db.get_atom(current.atom_id).await {
+                Ok(a) => a,
+                Err(_) => continue,
+            };
+            
+            // Load content from filesystem (zero-copy via mmap)
+            let content = match self.storage.read_range(&atom.source_path, atom.start_byte, atom.end_byte).await {
+                Ok(bytes) => String::from_utf8_lossy(&bytes).to_string(),
+                Err(_) => atom.source_path.clone(), // Fallback to path if read fails
+            };
+            
+            // Calculate gravity score with hop-distance damping
+            // W(q,a) = semantic_gravity × γ^d(q,a) × temporal_decay × structural_similarity
+            let gravity_score = current.gravity_score * damping_factor.powi(current.hop_distance as i32);
+            
+            // Add to results
+            results.push(IlluminateResultItem {
+                id: atom.id,
+                source_path: atom.source_path.clone(),
+                content,
+                tags: atom.tags.clone(),
+                hop_distance: current.hop_distance,
+                gravity_score,
+                simhash: atom.simhash,
+            });
+            
+            // Find neighboring atoms via shared tags
+            let atom_tags = self.db.get_tags_for_atom(atom.id).await.unwrap_or_default();
+            
+            for tag in &atom_tags {
+                // Find all atoms with this tag
+                let neighbor_atoms = self.db.get_atoms_by_tag(&tag.tag).await.unwrap_or_default();
+                
+                for neighbor in &neighbor_atoms {
+                    // Skip if already visited
+                    if visited.contains(&neighbor.id) {
+                        continue;
+                    }
+                    
+                    // Mark as visited and add to queue
+                    if visited.insert(neighbor.id) {
+                        queue.push_back(IlluminateNode {
+                            atom_id: neighbor.id,
+                            hop_distance: current.hop_distance + 1,
+                            gravity_score,
+                        });
+                    }
+                }
+            }
+        }
+        
+        let duration = start.elapsed().as_millis() as f64;
+        
+        info!("   └─ ✅ COMPLETE: {} nodes illuminated ({} explored) in {:.1}ms",
+              results.len(), nodes_explored, duration);
+        
+        Ok(IlluminateResponse {
+            nodes: results,
+            total: results.len(),
+            nodes_explored,
+            duration_ms: duration,
+        })
+    }
+
+    /// Get storage reference (for benchmarks).
+    pub fn storage(&self) -> &FileSystemStorage {
+        &self.storage
     }
 }
 

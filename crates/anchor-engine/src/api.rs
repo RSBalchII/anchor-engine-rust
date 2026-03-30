@@ -19,58 +19,14 @@ use crate::service::AnchorService;
 /// Shared application state.
 pub type SharedState = Arc<RwLock<AnchorService>>;
 
-/// Search UI route - serves the beautiful frontend interface.
+/// Search UI route - serves the beautiful frontend interface (v5.0.0 UI).
 async fn search_ui() -> Html<&'static str> {
-    Html(include_str!("../static/search.html"))
+    Html(include_str!("../static/index.html"))
 }
 
-/// Root route handler - returns a nice HTML welcome page.
-async fn root() -> Html<&'static str> {
-    Html(r##"
-        <!DOCTYPE html>
-        <html>
-        <head>
-            <title>Anchor Engine v0.1.0</title>
-            <style>
-                body { font-family: system-ui; max-width: 800px; margin: 40px auto; padding: 20px; }
-                h1 { color: #e67e22; }
-                .endpoint { background: #f4f4f4; padding: 10px; margin: 10px 0; border-radius: 5px; }
-                code { background: #e0e0e0; padding: 2px 6px; border-radius: 3px; }
-            </style>
-        </head>
-        <body>
-            <h1>🚀 Anchor Engine v0.1.0</h1>
-            <p>Your privacy-first context engine is running!</p>
-            
-            <h2>Available Endpoints</h2>
-            <div class="endpoint"><code>GET /health</code> - Health check</div>
-            <div class="endpoint"><code>GET /stats</code> - Database statistics</div>
-            <div class="endpoint"><code>POST /v1/memory/search</code> - Search knowledge base</div>
-            <div class="endpoint"><code>POST /v1/memory/ingest</code> - Ingest content</div>
-            <div class="endpoint"><code>POST /v1/chat/completions</code> - OpenAI-compatible chat</div>
-            
-            <h2>Quick Start</h2>
-            <pre><code>
-# Health check
-curl http://localhost:3160/health
-
-# Ingest content
-curl -X POST http://localhost:3160/v1/memory/ingest \
-  -H "Content-Type: application/json" \
-  -d '{"source":"test.md","content":"Rust is great"}'
-
-# Search
-curl -X POST http://localhost:3160/v1/memory/search \
-  -H "Content-Type: application/json" \
-  -d '{"query":"#rust"}'
-            </code></pre>
-            
-            <p style="color: #888; margin-top: 40px;">
-                Anchor Engine is licensed under AGPL-3.0
-            </p>
-        </body>
-        </html>
-    "##)
+/// Root route handler - redirects to the main UI.
+async fn root() -> axum::response::Redirect {
+    axum::response::Redirect::to("/search")
 }
 
 /// Create the API router.

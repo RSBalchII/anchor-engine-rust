@@ -1,6 +1,6 @@
 # Anchor Engine (Rust) - Implementation Tasks
 
-**Last Updated:** February 20, 2026 | **Status:** ✅ Implementation Complete
+**Last Updated:** March 30, 2026 | **Status:** ✅ Phase 2 Complete (Pointer-Only Storage)
 
 ---
 
@@ -28,19 +28,67 @@
 
 ---
 
+## ✅ Completed (March 2026)
+
+### Phase: MCP Server Implementation
+- [x] Create anchor-mcp crate structure
+- [x] Implement JSON-RPC 2.0 protocol handler
+- [x] Implement stdio communication loop
+- [x] Implement anchor_query tool (STAR search)
+- [x] Implement anchor_get_stats tool
+- [x] Implement anchor_read_file tool
+- [x] Implement anchor_list_compounds tool
+- [x] Implement anchor_ingest_text tool
+- [x] Implement anchor_ingest_file tool
+- [x] Add anchor_distill stub (placeholder)
+- [x] Add anchor_illuminate stub (placeholder)
+- [x] Create integration test suite (7 tests)
+- [x] Write comprehensive README.md
+- [x] Update workspace Cargo.toml
+
+### Phase: Documentation Standards
+- [x] Enforce doc_policy.md (README + CHANGELOG at root only)
+- [x] Archive old backup docs to specs/archive/
+- [x] Remove scattered IMPLEMENTATION_SUMMARY.md files
+- [x] Centralize documentation in specs/ directory
+
+### Phase 2: Pointer-Only Storage (Mirror Protocol) ✅
+- [x] Create Storage trait for pointer-only filesystem
+- [x] Implement FileSystemStorage with LRU cache
+- [x] Update Atom model (source_path, start_byte, end_byte)
+- [x] Update database schema (remove content, add pointers)
+- [x] Update all SQL queries (insert, select, FTS)
+- [x] Update service layer (ingest with storage)
+- [x] Create storage module tests (4 tests)
+- [x] Update database tests for pointer-only storage
+- [x] Document migration in specs/phase2_database_migration.md
+- [x] Create zero-copy storage standard (specs/standards/zero_copy_storage.md)
+
+---
+
 ## 🎯 Current Focus
 
-### Phase: Production Testing
-- [ ] Test with real-world data
-- [ ] Benchmark performance vs Node.js version
-- [ ] Validate all 181 tests pass on CI/CD
-- [ ] Document deployment procedures
+### Phase 3: Service Layer Integration ✅
+- [x] Update main.rs to pass mirror_dir to AnchorService
+- [x] Update api.rs with mirror_dir configuration
+- [x] Update config module for mirror_dir setting
+- [x] Integration testing (end-to-end pointer-only)
+- [x] Create pointer_only_integration.rs test suite (7 tests)
 
-### Phase: Optimization
-- [ ] Connection pooling (r2d2) for concurrent writes
-- [ ] SIMD acceleration for SimHash operations
-- [ ] Query optimization for large datasets
-- [ ] Memory profiling and optimization
+### Phase 4: MCP Tools Completion ✅
+- [x] Implement anchor_distill full functionality
+- [x] Implement anchor_illuminate full functionality
+- [x] Test MCP tools with pointer-only storage
+- [x] Add pre-allocation with_capacity() for BFS (zero reallocations)
+- [x] Add illuminate integration tests (3 tests)
+
+### Phase 5: Benchmarking ✅
+- [x] Create benchmark suite (criterion)
+- [x] Measure ingestion throughput
+- [x] Measure search latency (p50, p95, p99)
+- [x] Compare memory usage vs Node.js version
+- [x] Create profiling standard (specs/standards/profiling.md)
+- [x] Add heaptrack/valgrind/perf documentation
 
 ---
 

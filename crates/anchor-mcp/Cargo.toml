@@ -1,0 +1,40 @@
+[package]
+name = "anchor-mcp"
+version = "0.1.0"
+edition = "2021"
+license = "AGPL-3.0"
+description = "MCP server for Anchor Engine - exposes tools via JSON-RPC 2.0 over stdio"
+
+[[bin]]
+name = "anchor-mcp"
+path = "src/main.rs"
+
+[dependencies]
+# Core async runtime
+tokio = { version = "1.35", features = ["full", "rt-multi-thread", "macros", "io-util", "io-std", "sync"] }
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# Error handling
+anyhow = "1.0"
+thiserror = "1.0"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Command line arguments
+clap = { version = "4.4", features = ["derive"] }
+
+# Local anchor-engine crate
+anchor-engine = { path = "../anchor-engine" }
+
+# UUID for request IDs
+uuid = { version = "1.6", features = ["v4", "serde"] }
+
+[dev-dependencies]
+assert_cmd = "2.0"
+predicates = "3.0"
+tempfile = "3.9"

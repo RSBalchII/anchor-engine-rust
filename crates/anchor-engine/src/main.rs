@@ -130,8 +130,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Arc::new(RwLock::new(ingestion_service)),
     );
 
-    // Create service
-    let service = AnchorService::new(db.clone());
+    // Create service with pointer-only storage
+    let mirror_dir = config.settings.mirrored_brain_path();
+    tracing::info!("Mirror directory: {:?}", mirror_dir);
+    
+    let service = AnchorService::new(db.clone(), mirror_dir)
+        .expect("Failed to create AnchorService with storage");
     let state: Arc<RwLock<AnchorService>> = Arc::new(RwLock::new(service));
 
     // Start HTTP server

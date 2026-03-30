@@ -6,6 +6,7 @@ resolver = "2"
 
 members = [
     "crates/anchor-engine",
+    "crates/anchor-mcp",
     # anchor-ui is now a WASM app (built separately)
     # Future members:
     # "crates/anchor-inference",
