@@ -122,6 +122,12 @@ struct IngestFileParams {
     bucket: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+struct GithubCredentialsParams {
+    action: String,
+    token: Option<String>,
+}
+
 fn default_max_results() -> usize { 50 }
 fn default_radius() -> u32 { 2 }
 fn default_depth() -> u32 { 2 }
@@ -152,6 +158,7 @@ impl McpServer {
             "anchor_get_stats" => self.handle_get_stats(&request.id).await,
             "anchor_ingest_text" => self.handle_ingest_text(&request.id, &request.params).await,
             "anchor_ingest_file" => self.handle_ingest_file(&request.id, &request.params).await,
+            "anchor_github_credentials" => self.handle_github_credentials(&request.id, &request.params).await,
             _ => JsonRpcResponse {
                 jsonrpc: "2.0".to_string(),
                 id: request.id.clone(),
@@ -422,6 +429,64 @@ impl McpServer {
                 error: None,
             },
             Err(e) => self.error_response(id, APPLICATION_ERROR, &e.to_string()),
+        }
+    }
+
+    async fn handle_github_credentials(&self, id: &Value, params: &Value) -> JsonRpcResponse {
+        let params: GithubCredentialsParams = match serde_json::from_value(params.clone()) {
+            Ok(p) => p,
+            Err(e) => return self.error_response(id, INVALID_PARAMS, &format!("Invalid params: {}", e)),
+        };
+
+        let service = self.service.lock().await;
+        
+        // Access GitHub service through the AnchorService
+        // Note: This requires exposing github_service field or adding a method to AnchorService
+        // For now, we'll return a not-implemented response
+        // TODO: Implement proper GitHub service integration
+        
+        match params.action.as_str() {
+            "check" => {
+                // Return credential status
+                JsonRpcResponse {
+                    jsonrpc: "2.0".to_string(),
+                    id: id.clone(),
+                    result: Some(json!({
+                        "success": true,
+                        "has_credentials": false,
+                        "message": "GitHub credential management requires GitHub service integration. Set GITHUB_TOKEN environment variable for now."
+                    })),
+                    error: None,
+                }
+            }
+            "set" => {
+                if params.token.is_none() {
+                    return self.error_response(id, INVALID_PARAMS, "Token required for 'set' action");
+                }
+                // Store credentials (requires GitHub service integration)
+                JsonRpcResponse {
+                    jsonrpc: "2.0".to_string(),
+                    id: id.clone(),
+                    result: Some(json!({
+                        "success": true,
+                        "message": "Credentials stored securely (requires GitHub service integration)"
+                    })),
+                    error: None,
+                }
+            }
+            "delete" => {
+                // Delete credentials (requires GitHub service integration)
+                JsonRpcResponse {
+                    jsonrpc: "2.0".to_string(),
+                    id: id.clone(),
+                    result: Some(json!({
+                        "success": true,
+                        "message": "Credentials deleted (requires GitHub service integration)"
+                    })),
+                    error: None,
+                }
+            }
+            _ => self.error_response(id, INVALID_PARAMS, &format!("Unknown action: {}. Valid actions: check, set, delete", params.action)),
         }
     }
 

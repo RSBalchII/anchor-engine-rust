@@ -36,6 +36,8 @@ pub mod api;
 pub mod config;
 pub mod services;
 pub mod storage;
+pub mod dto;
+pub mod extractors;
 
 pub use db::{Database, DbError, DbStats};
 pub use models::*;
@@ -44,6 +46,7 @@ pub use api::{start_server, create_router, SharedState};
 pub use config::{Config, UserSettings};
 pub use services::{WatchdogService, IngestionService, IngestionResult, IngestionConfig, GitHubService, GitHubRepo, AutoSynonymGenerator};
 pub use storage::{Storage, FileSystemStorage};
+pub use dto::{GithubIngestDto, GithubAction, GithubSyncParams, GithubCredentialsParams, GithubRateLimitParams, RateLimitInfo};
 
 /// Library version
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

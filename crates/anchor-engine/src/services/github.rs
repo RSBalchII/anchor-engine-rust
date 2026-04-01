@@ -1,9 +1,10 @@
 //! GitHub Service - Fetch and extract repository tarballs.
 //!
-//! This service handles:
-//! 1. Fetching tarballs from GitHub (public or private repos)
-//! 2. Extracting tarballs to external-inbox directory
-//! 3. Tracking repository metadata
+//! This service provides:
+//! 1. Secure credential storage (Windows Credential Manager / macOS Keychain / Linux libsecret)
+//! 2. Fetching tarballs from GitHub (public or private repos)
+//! 3. Extracting tarballs to external-inbox directory
+//! 4. Tracking repository metadata
 
 use std::path::{Path, PathBuf};
 use std::fs;
@@ -14,6 +15,7 @@ use flate2::read::GzDecoder;
 use tar::Archive;
 use thiserror::Error;
 use tracing::{info, warn, error, debug};
+use keyring::Entry;
 
 /// GitHub service errors.
 #[derive(Error, Debug)]
@@ -150,6 +152,8 @@ pub struct GitHubService {
     extract_base: PathBuf,
     /// Tracked repositories (for periodic sync)
     tracked_repos: Arc<Mutex<Vec<TrackedRepo>>>,
+    /// Secure credential storage (Windows Credential Manager / macOS Keychain / Linux libsecret)
+    credential_entry: Entry,
 }
 
 /// A tracked repository for periodic sync.
@@ -163,6 +167,14 @@ pub struct TrackedRepo {
     pub sync_interval_secs: u64,
     /// Whether sync is enabled
     pub enabled: bool,
+}
+
+/// GitHub credential status (for API/UI responses).
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct CredentialStatus {
+    pub has_credentials: bool,
+    pub credential_source: Option<String>,
+    pub message: String,
 }
 
 impl TrackedRepo {
@@ -194,17 +206,96 @@ impl TrackedRepo {
 
 impl GitHubService {
     /// Create a new GitHub service.
-    pub fn new(extract_base: PathBuf) -> Self {
-        Self {
+    pub fn new(extract_base: PathBuf) -> Result<Self> {
+        // Create credential entry (service="AnchorEngine", user="GitHub")
+        let credential_entry = Entry::new("AnchorEngine", "GitHub")
+            .map_err(|e| GitHubError::IoError(io::Error::new(
+                io::ErrorKind::Other,
+                format!("Failed to create credential entry: {}", e)
+            )))?;
+
+        Ok(Self {
             client: reqwest::Client::new(),
             extract_base,
             tracked_repos: Arc::new(Mutex::new(Vec::new())),
-        }
+            credential_entry,
+        })
     }
-    
+
     /// Create with custom sync interval.
-    pub fn with_sync_interval(extract_base: PathBuf, _interval_secs: u64) -> Self {
+    pub fn with_sync_interval(extract_base: PathBuf, _interval_secs: u64) -> Result<Self> {
         Self::new(extract_base)
+    }
+
+    // ========================================================================
+    // Credential Management (Secure Storage)
+    // ========================================================================
+
+    /// Store GitHub PAT securely in OS credential manager.
+    /// 
+    /// # Arguments
+    /// * `token` - GitHub Personal Access Token (format: ghp_...)
+    pub fn store_credentials(&self, token: &str) -> Result<()> {
+        self.credential_entry.set_password(token)
+            .map_err(|e| GitHubError::IoError(io::Error::new(
+                io::ErrorKind::Other,
+                format!("Failed to store credentials: {}", e)
+            )))?;
+        info!("✅ GitHub credentials stored securely");
+        Ok(())
+    }
+
+    /// Retrieve GitHub PAT from secure storage.
+    /// 
+    /// # Returns
+    /// * `Some(String)` - Token if found
+    /// * `None` - No token stored (falls back to GITHUB_TOKEN env var)
+    pub fn get_credentials(&self) -> Option<String> {
+        // Try secure storage first
+        if let Ok(token) = self.credential_entry.get_password() {
+            return Some(token);
+        }
+        
+        // Fallback to environment variable
+        std::env::var("GITHUB_TOKEN").ok()
+    }
+
+    /// Delete stored credentials.
+    pub fn delete_credentials(&self) -> Result<()> {
+        self.credential_entry.delete_password()
+            .map_err(|e| GitHubError::IoError(io::Error::new(
+                io::ErrorKind::Other,
+                format!("Failed to delete credentials: {}", e)
+            )))?;
+        info!("🗑️ GitHub credentials deleted");
+        Ok(())
+    }
+
+    /// Check if credentials are available (secure storage or env var).
+    pub fn has_credentials(&self) -> bool {
+        self.get_credentials().is_some()
+    }
+
+    /// Get credential status with details (for UI/API).
+    pub fn get_credential_status(&self) -> CredentialStatus {
+        let has_creds = self.has_credentials();
+        let source = if self.credential_entry.get_password().is_ok() {
+            Some("secure_storage".to_string())
+        } else if std::env::var("GITHUB_TOKEN").is_ok() {
+            Some("environment_variable".to_string())
+        } else {
+            None
+        };
+        
+        CredentialStatus {
+            has_credentials: has_creds,
+            credential_source: source,
+            message: if has_creds {
+                "GitHub credentials configured".to_string()
+            } else {
+                "No GitHub credentials found. Set token via 'set' action or GITHUB_TOKEN env var.".to_string()
+            },
+        }
     }
     
     /// Fetch and extract a GitHub repository.

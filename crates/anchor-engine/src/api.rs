@@ -395,8 +395,9 @@ async fn ingest_github(
     let extract_base = config.settings.external_inbox_path();
     
     // Create GitHub service
-    let github_service = crate::services::GitHubService::new(extract_base);
-    
+    let github_service = crate::services::GitHubService::new(extract_base)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
     // Fetch and extract
     match github_service.fetch_and_extract(&repo).await {
         Ok(extract_path) => {

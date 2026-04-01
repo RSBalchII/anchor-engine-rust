@@ -698,6 +698,30 @@ mod tests {
         db.upsert_source(&source).await.unwrap();
 
         // Create atom with pointer-only storage
+        let atom = Atom {
+            id: 0,
+            source_id: "source-1".to_string(),
+            source_path: "/mirrored_brain/test.md".to_string(),
+            start_byte: 0,
+            end_byte: 12,
+            char_start: 0,
+            char_end: 12,
+            timestamp: Utc::now().timestamp() as f64,
+            simhash: 0x1234567890ABCDEF,
+            tags: Vec::new(),
+            metadata: None,
+            content: None,
+        };
+
+        let id = db.insert_atom(&atom).await.unwrap();
+        assert!(id > 0);
+
+        let retrieved = db.get_atom(id).await.unwrap();
+        assert_eq!(retrieved.source_path, "/mirrored_brain/test.md");
+        assert_eq!(retrieved.start_byte, 0);
+        assert_eq!(retrieved.end_byte, 12);
+    }
+
     #[tokio::test]
     async fn test_atom_operations() {
         let db = Database::in_memory().unwrap();
