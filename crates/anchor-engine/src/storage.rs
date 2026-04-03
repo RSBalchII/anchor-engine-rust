@@ -18,6 +18,7 @@ use std::collections::HashMap;
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 use sha2::{Sha256, Digest};
 
 /// LRU Cache for frequently accessed content
@@ -74,24 +75,24 @@ impl ContentCache {
 pub trait Storage: Send + Sync {
     /// Write sanitized content to mirrored_brain/ and return the file path
     fn write_cleaned(&self, source: &str, content: &str) -> Result<String>;
-    
+
     /// Read content from a file at specific byte range
     fn read_range(&self, path: &str, start: usize, end: usize) -> Result<String>;
-    
+
     /// Read entire file content
     fn read_all(&self, path: &str) -> Result<String>;
-    
+
     /// Get the mirrored_brain directory path
     fn get_mirror_dir(&self) -> &Path;
-    
+
     /// Clear the content cache (for testing)
-    fn clear_cache(&mut self);
+    fn clear_cache(&self);
 }
 
 /// Filesystem-based pointer-only storage implementation
 pub struct FileSystemStorage {
     mirror_dir: PathBuf,
-    cache: ContentCache,
+    cache: Arc<Mutex<ContentCache>>,
 }
 
 impl FileSystemStorage {
@@ -100,10 +101,10 @@ impl FileSystemStorage {
         // Create mirror directory if it doesn't exist
         fs::create_dir_all(&mirror_dir)
             .with_context(|| format!("Failed to create mirror directory: {:?}", mirror_dir))?;
-        
+
         Ok(Self {
             mirror_dir,
-            cache: ContentCache::new(1000), // Cache 1000 most recent content blocks
+            cache: Arc::new(Mutex::new(ContentCache::new(1000))), // Cache 1000 most recent content blocks
         })
     }
     
@@ -178,60 +179,72 @@ impl Storage for FileSystemStorage {
     fn read_range(&self, path: &str, start: usize, end: usize) -> Result<String> {
         // Create cache key
         let cache_key = format!("{}:{}:{}", path, start, end);
-        
+
         // Check cache first
-        if let Some(cached) = self.cache.get(&cache_key) {
-            return Ok(cached.clone());
+        {
+            let mut cache = self.cache.lock().unwrap();
+            if let Some(cached) = cache.get(&cache_key) {
+                return Ok(cached.clone());
+            }
         }
-        
+
         // Open file
         let mut file = File::open(path)
             .with_context(|| format!("Failed to open file: {}", path))?;
-        
+
         // Seek to start position
         file.seek(SeekFrom::Start(start as u64))
             .with_context(|| format!("Failed to seek to position {}: {}", start, path))?;
-        
+
         // Calculate bytes to read
         let bytes_to_read = end - start;
-        
+
         // Read content
         let mut buffer = vec![0u8; bytes_to_read];
         file.read_exact(&mut buffer)
             .with_context(|| format!("Failed to read {} bytes from {}: {}", bytes_to_read, path, start))?;
-        
+
         // Convert to string
         let content = String::from_utf8(buffer)
             .with_context(|| format!("Invalid UTF-8 in file {} at {}:{}", path, start, end))?;
-        
+
         // Cache the result
-        self.cache.insert(cache_key, content.clone());
-        
+        {
+            let mut cache = self.cache.lock().unwrap();
+            cache.insert(cache_key, content.clone());
+        }
+
         Ok(content)
     }
     
     fn read_all(&self, path: &str) -> Result<String> {
         // Check cache first
-        if let Some(cached) = self.cache.get(path) {
-            return Ok(cached.clone());
+        {
+            let mut cache = self.cache.lock().unwrap();
+            if let Some(cached) = cache.get(path) {
+                return Ok(cached.clone());
+            }
         }
-        
+
         // Read entire file
         let content = fs::read_to_string(path)
             .with_context(|| format!("Failed to read file: {}", path))?;
-        
+
         // Cache the result
-        self.cache.insert(path.to_string(), content.clone());
-        
+        {
+            let mut cache = self.cache.lock().unwrap();
+            cache.insert(path.to_string(), content.clone());
+        }
+
         Ok(content)
     }
     
     fn get_mirror_dir(&self) -> &Path {
         &self.mirror_dir
     }
-    
-    fn clear_cache(&mut self) {
-        self.cache = ContentCache::new(1000);
+
+    fn clear_cache(&self) {
+        *self.cache.lock().unwrap() = ContentCache::new(1000);
     }
 }
 
@@ -302,25 +315,25 @@ mod tests {
     #[test]
     fn test_cache() {
         let temp_dir = TempDir::new().unwrap();
-        let mut storage = FileSystemStorage::new(temp_dir.path().to_path_buf()).unwrap();
-        
+        let storage = FileSystemStorage::new(temp_dir.path().to_path_buf()).unwrap();
+
         let source = "test/document.md";
         let content = "Test content for caching";
-        
+
         // Write content
         let path = storage.write_cleaned(source, content).unwrap();
         let file_size = fs::metadata(&path).unwrap().len() as usize;
-        
+
         // First read (from disk)
         let _ = storage.read_range(&path, 0, file_size);
-        
+
         // Second read (from cache)
         let cached = storage.read_range(&path, 0, file_size);
         assert!(cached.is_ok());
-        
+
         // Clear cache
         storage.clear_cache();
-        
+
         // Third read (from disk again)
         let _ = storage.read_range(&path, 0, file_size);
     }

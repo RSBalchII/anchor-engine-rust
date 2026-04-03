@@ -2,31 +2,31 @@
 REM Anchor Engine Rust - Quick Build Script
 REM Cleans locked files and builds automatically
 
-echo 🚀 Anchor Engine Rust - Build Script
+echo Anchor Engine Rust - Build Script
 echo =====================================
 echo.
 
 REM Check if cleanup script exists
 if exist "scripts\cleanup-build.ps1" (
-    echo 🧹 Cleaning locked files...
+    echo [CLEANUP] Running cleanup...
     powershell -ExecutionPolicy Bypass -File scripts\cleanup-build.ps1
     if errorlevel 1 (
         echo.
-        echo ⚠️  Cleanup had issues, but continuing with build...
+        echo [WARN] Cleanup had issues, but continuing with build...
         echo.
     )
 ) else (
-    echo ⚠️  Cleanup script not found, skipping...
+    echo [WARN] Cleanup script not found, skipping...
     echo.
 )
 
-echo 📦 Building anchor-engine...
+echo [BUILD] Building anchor-engine...
 echo.
-cargo build -p anchor-engine
+cargo build --bin anchor-engine
 
 if errorlevel 1 (
     echo.
-    echo ❌ Build failed!
+    echo [ERROR] Build failed!
     echo.
     echo Try running cleanup manually:
     echo   powershell -File scripts\cleanup-build.ps1
@@ -35,8 +35,8 @@ if errorlevel 1 (
 )
 
 echo.
-echo ✅ Build successful!
+echo [OK] Build successful!
 echo.
 echo To run:
-echo   cargo run -p anchor-engine -- --port 3160
+echo   cargo run --bin anchor-engine -- --port 3160
 echo.

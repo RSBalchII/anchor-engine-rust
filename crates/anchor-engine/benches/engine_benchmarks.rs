@@ -8,6 +8,7 @@
 
 use anchor_engine::{Database, AnchorService, FileSystemStorage};
 use anchor_engine::models::{IngestRequest, IngestOptions, SearchRequest, SearchMode, BudgetConfig, IlluminateRequest};
+use anchor_engine::config::Config;
 use anchor_fingerprint::simhash;
 use criterion::{black_box, criterion_group, criterion_main, Criterion, BenchmarkId, Throughput};
 use std::path::PathBuf;
@@ -129,14 +130,15 @@ fn bench_hamming_distance(c: &mut Criterion) {
 fn setup_benchmark_service() -> (AnchorService, TempDir, TempDir) {
     let db_dir = TempDir::new().unwrap();
     let mirror_dir = TempDir::new().unwrap();
-    
+
     let db_path = db_dir.path().join("test.db");
-    
+
     // Use tokio runtime for async setup
     let rt = tokio::runtime::Runtime::new().unwrap();
     let db = rt.block_on(Database::open(&db_path)).unwrap();
-    let service = AnchorService::new(db, mirror_dir.path().to_path_buf()).unwrap();
-    
+    let config = Config::default();
+    let service = AnchorService::new(db, mirror_dir.path().to_path_buf(), config).unwrap();
+
     (service, db_dir, mirror_dir)
 }
 

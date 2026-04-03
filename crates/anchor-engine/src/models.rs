@@ -76,11 +76,11 @@ impl Atom {
         if let Some(ref content) = self.content {
             return Ok(content);
         }
-        
+
         // Load from filesystem
         let content = storage.read_range(&self.source_path, self.start_byte, self.end_byte)
-            .map_err(|e| crate::db::Error::DatabaseError(e.to_string()))?;
-        
+            .map_err(|e| crate::db::DbError::Migration(e.to_string()))?;
+
         self.content = Some(content);
         Ok(self.content.as_ref().unwrap())
     }
@@ -151,44 +151,8 @@ pub enum SearchMode {
 }
 
 /// Budget configuration for search.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct BudgetConfig {
-    /// Planet budget fraction (default: 0.70)
-    #[serde(default = "default_planet_budget")]
-    pub planet_budget: f32,
-    /// Moon budget fraction (default: 0.30)
-    #[serde(default = "default_moon_budget")]
-    pub moon_budget: f32,
-    /// Total token budget
-    #[serde(default = "default_token_budget")]
-    pub total_tokens: usize,
-    /// Enable max-recall mode (for 16K+ token queries)
-    #[serde(default)]
-    pub max_recall: bool,
-}
-
-fn default_planet_budget() -> f32 {
-    0.70
-}
-
-fn default_moon_budget() -> f32 {
-    0.30
-}
-
-fn default_token_budget() -> usize {
-    8192
-}
-
-impl Default for BudgetConfig {
-    fn default() -> Self {
-        Self {
-            planet_budget: default_planet_budget(),
-            moon_budget: default_moon_budget(),
-            total_tokens: default_token_budget(),
-            max_recall: false,
-        }
-    }
-}
+/// Note: Now defined in config.rs, re-exported here for backwards compatibility.
+pub use crate::config::BudgetConfig;
 
 /// Search response.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -314,11 +278,11 @@ impl Default for IlluminateRequest {
 }
 
 /// Internal BFS queue node.
-#[derive(Debug, Clone)]
-struct IlluminateNode {
-    atom_id: u64,
-    hop_distance: u32,
-    gravity_score: f64,
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IlluminateNode {
+    pub atom_id: u64,
+    pub hop_distance: u32,
+    pub gravity_score: f64,
 }
 
 /// Illuminate result item.
@@ -362,19 +326,18 @@ pub struct DistillRequest {
     #[serde(default = "default_radius")]
     pub radius: u32,
     /// Maximum atoms to collect (default: 1000)
-    #[serde(default = "default_max_atoms")]
+    #[serde(default)]
     pub max_atoms: Option<usize>,
 }
 
 fn default_radius() -> u32 { 2 }
-fn default_max_atoms() -> usize { 1000 }
 
 impl Default for DistillRequest {
     fn default() -> Self {
         Self {
             seed: None,
             radius: default_radius(),
-            max_atoms: Some(default_max_atoms()),
+            max_atoms: Some(1000),
         }
     }
 }

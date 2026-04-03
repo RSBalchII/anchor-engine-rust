@@ -31,6 +31,12 @@ pub enum DbError {
 
     #[error("Migration error: {0}")]
     Migration(String),
+
+    #[error("Anyhow error: {0}")]
+    Anyhow(#[from] anyhow::Error),
+
+    #[error("JSON error: {0}")]
+    Json(#[from] serde_json::Error),
 }
 
 /// Result type for database operations.

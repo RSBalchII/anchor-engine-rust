@@ -11,52 +11,10 @@ use tokio::time::{Duration, sleep};
 use tracing::{info, warn, error};
 use ignore::WalkBuilder;
 
-use crate::config::UserSettings;
+use crate::config::Config;
 use crate::services::ingestion::IngestionService;
 
-/// Watchdog service configuration.
-#[derive(Debug, Clone)]
-pub struct WatchdogConfig {
-    /// Directories to watch
-    pub watch_paths: Vec<PathBuf>,
-    /// Stability threshold in milliseconds
-    pub stability_threshold_ms: u64,
-    /// Enable auto-ingest
-    pub auto_ingest: bool,
-    /// Ignore patterns (dotfiles, etc.)
-    pub ignore_patterns: Vec<String>,
-}
-
-impl Default for WatchdogConfig {
-    fn default() -> Self {
-        Self {
-            watch_paths: vec![],
-            stability_threshold_ms: 500,
-            auto_ingest: true,
-            ignore_patterns: vec![
-                ".git".to_string(),        // Git directories (not all dotfiles)
-                "node_modules".to_string(), // Node modules
-                "target".to_string(),      // Rust build artifacts
-                "*.swp".to_string(),       // Vim swap files
-                "*.bak".to_string(),       // Backup files
-                "*.log".to_string(),       // Log files
-            ],
-        }
-    }
-}
-
-impl From<&UserSettings> for WatchdogConfig {
-    fn from(settings: &UserSettings) -> Self {
-        Self {
-            watch_paths: settings.all_watch_paths(),
-            stability_threshold_ms: settings.watcher_stability_threshold_ms,
-            auto_ingest: settings.auto_ingest,
-            ..Default::default()
-        }
-    }
-}
-
-/// Watchdog service state.
+/// Watchdog service for monitoring file system changes.
 #[derive(Debug, Clone)]
 pub struct WatchdogState {
     /// Is the watchdog running?
@@ -70,9 +28,20 @@ pub struct WatchdogState {
 }
 
 /// Watchdog service for monitoring file system changes.
+
+/// Default ignore patterns for watchdog
+const DEFAULT_IGNORE_PATTERNS: &[&str] = &[
+    ".git",
+    "node_modules",
+    "target",
+    "*.swp",
+    "*.bak",
+    "*.log",
+];
+
 pub struct WatchdogService {
-    /// Service configuration
-    config: WatchdogConfig,
+    /// Configuration (provides watcher settings)
+    config: Config,
     /// Ingestion service
     ingestion: Arc<RwLock<IngestionService>>,
     /// Service state
@@ -83,7 +52,7 @@ pub struct WatchdogService {
 
 impl WatchdogService {
     /// Create a new Watchdog service.
-    pub fn new(config: WatchdogConfig, ingestion: Arc<RwLock<IngestionService>>) -> Self {
+    pub fn new(config: Config, ingestion: Arc<RwLock<IngestionService>>) -> Self {
         Self {
             config,
             ingestion,
@@ -97,12 +66,12 @@ impl WatchdogService {
         }
     }
 
-    /// Create from user settings.
-    pub fn from_settings(
-        settings: &UserSettings,
+    /// Create from config.
+    pub fn from_config(
+        config: &Config,
         ingestion: Arc<RwLock<IngestionService>>,
     ) -> Self {
-        let config = WatchdogConfig::from(settings);
+        let config = config.clone();
         Self::new(config, ingestion)
     }
 
@@ -115,13 +84,16 @@ impl WatchdogService {
         }
 
         info!("📥 Watchdog Service: ACTIVE");
-        info!("   Watching {} directories:", self.config.watch_paths.len());
-        for path in &self.config.watch_paths {
+        info!("   Watching {} directories:", self.config.watcher.extra_paths.len() + 1);
+        // Build watch paths for display
+        let mut watch_paths = vec![self.config.paths.notebook.clone()];
+        watch_paths.extend(self.config.watcher.extra_paths.iter().cloned());
+        for path in &watch_paths {
             info!("     - {:?}", path);
         }
 
         state.is_running = true;
-        state.watched_paths = self.config.watch_paths.clone();
+        state.watched_paths = watch_paths.iter().map(PathBuf::from).collect();
         drop(state);
 
         // Start the watch loop
@@ -146,7 +118,7 @@ impl WatchdogService {
 
     /// Main watch loop.
     async fn watch_loop(&self) {
-        let stability_duration = Duration::from_millis(self.config.stability_threshold_ms);
+        let stability_duration = Duration::from_millis(self.config.watcher.stability_threshold_ms);
 
         loop {
             // Check if we should stop
@@ -158,8 +130,12 @@ impl WatchdogService {
             }
 
             // Scan all watched directories
-            for watch_path in &self.config.watch_paths {
-                if let Err(e) = self.scan_directory(watch_path).await {
+            // Build watch paths for iteration
+            let mut watch_paths = vec![self.config.paths.notebook.clone()];
+            watch_paths.extend(self.config.watcher.extra_paths.iter().cloned());
+            
+            for watch_path in &watch_paths {
+                if let Err(e) = self.scan_directory(watch_path.as_ref()).await {
                     error!("Error scanning directory {:?}: {}", watch_path, e);
                     let mut state = self.state.lock().await;
                     state.errors += 1;
@@ -224,7 +200,7 @@ impl WatchdogService {
         }
 
         // Ingest the file
-        if self.config.auto_ingest {
+        if self.config.watcher.auto_start {
             let ingestion = self.ingestion.read().await;
             match ingestion.ingest_file(path).await {
                 Ok(result) => {
@@ -255,7 +231,7 @@ impl WatchdogService {
     fn should_ignore(&self, path: &Path) -> bool {
         // Check filename
         if let Some(file_name) = path.file_name().and_then(|n| n.to_str()) {
-            for pattern in &self.config.ignore_patterns {
+            for pattern in DEFAULT_IGNORE_PATTERNS {
                 if pattern.starts_with('*') {
                     // Extension pattern (e.g., *.swp)
                     if file_name.ends_with(&pattern[1..]) {
@@ -271,7 +247,7 @@ impl WatchdogService {
         if let Some(parent) = path.parent() {
             for component in parent.components() {
                 if let Some(name) = component.as_os_str().to_str() {
-                    for pattern in &self.config.ignore_patterns {
+                    for pattern in DEFAULT_IGNORE_PATTERNS {
                         if !pattern.starts_with('*') && name.contains(pattern) {
                             return true;
                         }

@@ -8,6 +8,7 @@
 
 use anchor_engine::{Database, AnchorService, Storage, FileSystemStorage};
 use anchor_engine::models::{IngestRequest, IngestOptions, SearchRequest, SearchMode, BudgetConfig, IlluminateRequest};
+use anchor_engine::config::Config;
 use std::path::PathBuf;
 use tempfile::TempDir;
 use tokio::fs;
@@ -17,12 +18,13 @@ async fn create_test_service() -> (AnchorService, TempDir, TempDir) {
     // Create temporary directories
     let db_dir = TempDir::new().unwrap();
     let mirror_dir = TempDir::new().unwrap();
-    
+
     let db_path = db_dir.path().join("test.db");
     let db = Database::open(&db_path).await.unwrap();
-    
-    let service = AnchorService::new(db, mirror_dir.path().to_path_buf()).unwrap();
-    
+
+    let config = Config::default();
+    let service = AnchorService::new(db, mirror_dir.path().to_path_buf(), config).unwrap();
+
     (service, db_dir, mirror_dir)
 }
 

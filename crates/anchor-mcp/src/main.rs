@@ -6,6 +6,7 @@
 use anchor_engine::service::AnchorService;
 use anchor_engine::db::Database;
 use anchor_engine::models::*;
+use anchor_engine::config::Config;
 use anyhow::{Context, Result};
 use clap::Parser;
 use serde::{Deserialize, Serialize};
@@ -98,18 +99,6 @@ struct IlluminateParams {
 }
 
 #[derive(Debug, Deserialize)]
-struct ReadFileParams {
-    path: String,
-    start_line: Option<usize>,
-    end_line: Option<usize>,
-}
-
-#[derive(Debug, Deserialize)]
-struct ListCompoundsParams {
-    filter: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
 struct IngestTextParams {
     content: String,
     filename: String,
@@ -153,8 +142,6 @@ impl McpServer {
             "anchor_query" => self.handle_query(&request.id, &request.params).await,
             "anchor_distill" => self.handle_distill(&request.id, &request.params).await,
             "anchor_illuminate" => self.handle_illuminate(&request.id, &request.params).await,
-            "anchor_read_file" => self.handle_read_file(&request.id, &request.params).await,
-            "anchor_list_compounds" => self.handle_list_compounds(&request.id, &request.params).await,
             "anchor_get_stats" => self.handle_get_stats(&request.id).await,
             "anchor_ingest_text" => self.handle_ingest_text(&request.id, &request.params).await,
             "anchor_ingest_file" => self.handle_ingest_file(&request.id, &request.params).await,
@@ -179,7 +166,7 @@ impl McpServer {
         };
 
         let service = self.service.lock().await;
-        
+
         // Create search request
         let search_request = SearchRequest {
             query: params.query,
@@ -193,12 +180,12 @@ impl McpServer {
                 // Format results for MCP
                 let results: Vec<Value> = response.results.iter().map(|r| {
                     json!({
-                        "id": r.id,
+                        "id": r.atom_id,
                         "content": r.content,
-                        "score": r.score,
-                        "source": r.source,
-                        "tags": r.tags,
-                        "provenance": r.provenance.unwrap_or("search"),
+                        "score": r.relevance,
+                        "source": r.source_id,
+                        "tags": r.matched_tags,
+                        "result_type": r.result_type,
                     })
                 }).collect();
 
@@ -209,7 +196,7 @@ impl McpServer {
                         "results": results,
                         "total": response.total,
                         "stats": {
-                            "query_time_ms": response.stats.query_time_ms,
+                            "duration_ms": response.stats.duration_ms,
                             "planets": response.stats.planets,
                             "moons": response.stats.moons,
                         }
@@ -301,60 +288,15 @@ impl McpServer {
         }
     }
 
-    async fn handle_read_file(&self, id: &Value, params: &Value) -> JsonRpcResponse {
-        let params: ReadFileParams = match serde_json::from_value(params.clone()) {
-            Ok(p) => p,
-            Err(e) => return self.error_response(id, INVALID_PARAMS, &format!("Invalid params: {}", e)),
-        };
-
-        let service = self.service.lock().await;
-        
-        match service.read_file(&params.path, params.start_line, params.end_line).await {
-            Ok(content) => JsonRpcResponse {
-                jsonrpc: "2.0".to_string(),
-                id: id.clone(),
-                result: Some(json!({
-                    "path": params.path,
-                    "content": content,
-                })),
-                error: None,
-            },
-            Err(e) => self.error_response(id, APPLICATION_ERROR, &e.to_string()),
-        }
-    }
-
-    async fn handle_list_compounds(&self, id: &Value, params: &Value) -> JsonRpcResponse {
-        let params: ListCompoundsParams = match serde_json::from_value(params.clone()) {
-            Ok(p) => p,
-            Err(e) => return self.error_response(id, INVALID_PARAMS, &format!("Invalid params: {}", e)),
-        };
-
-        let service = self.service.lock().await;
-        
-        match service.list_compounds(params.filter.as_deref()).await {
-            Ok(compounds) => JsonRpcResponse {
-                jsonrpc: "2.0".to_string(),
-                id: id.clone(),
-                result: Some(json!({
-                    "compounds": compounds,
-                    "total": compounds.len(),
-                })),
-                error: None,
-            },
-            Err(e) => self.error_response(id, APPLICATION_ERROR, &e.to_string()),
-        }
-    }
-
     async fn handle_get_stats(&self, id: &Value) -> JsonRpcResponse {
         let service = self.service.lock().await;
-        
+
         match service.get_stats().await {
             Ok(stats) => JsonRpcResponse {
                 jsonrpc: "2.0".to_string(),
                 id: id.clone(),
                 result: Some(json!({
                     "atoms": stats.atoms,
-                    "molecules": stats.molecules,
                     "sources": stats.sources,
                     "tags": stats.tags,
                 })),
@@ -371,11 +313,11 @@ impl McpServer {
         };
 
         let mut service = self.service.lock().await;
-        
+
         let ingest_request = IngestRequest {
             source: params.filename.clone(),
             content: params.content,
-            bucket: params.bucket.unwrap_or_else(|| "default".to_string()),
+            bucket: params.bucket,
             options: IngestOptions::default(),
         };
 
@@ -385,9 +327,9 @@ impl McpServer {
                 id: id.clone(),
                 result: Some(json!({
                     "success": true,
-                    "atoms_ingested": response.atoms_ingested,
-                    "molecules_created": response.molecules_created,
-                    "duration_ms": response.duration_ms,
+                    "atoms_ingested": response.atoms_created,
+                    "atom_ids": response.atom_ids,
+                    "tags": response.tags,
                 })),
                 error: None,
             },
@@ -402,7 +344,7 @@ impl McpServer {
         };
 
         let mut service = self.service.lock().await;
-        
+
         // Read file content
         let content = match tokio::fs::read_to_string(&params.path).await {
             Ok(c) => c,
@@ -412,7 +354,7 @@ impl McpServer {
         let ingest_request = IngestRequest {
             source: params.path.clone(),
             content,
-            bucket: params.bucket.unwrap_or_else(|| "default".to_string()),
+            bucket: params.bucket,
             options: IngestOptions::default(),
         };
 
@@ -422,9 +364,9 @@ impl McpServer {
                 id: id.clone(),
                 result: Some(json!({
                     "success": true,
-                    "atoms_ingested": response.atoms_ingested,
-                    "molecules_created": response.molecules_created,
-                    "duration_ms": response.duration_ms,
+                    "atoms_ingested": response.atoms_created,
+                    "atom_ids": response.atom_ids,
+                    "tags": response.tags,
                 })),
                 error: None,
             },
@@ -526,12 +468,14 @@ async fn main() -> Result<()> {
     tracing::info!("📦 Database path: {}", args.db_path.display());
 
     // Initialize database
-    let db = Database::new(&args.db_path)
-        .await
+    let db = Database::open(&args.db_path)
         .context("Failed to initialize database")?;
 
     // Initialize service
-    let service = AnchorService::new(db);
+    let config = Config::default();
+    let mirror_dir = config.mirrored_brain_path();
+    let service = AnchorService::new(db, mirror_dir, config)
+        .context("Failed to create AnchorService")?;
 
     // Create MCP server
     let server = Arc::new(McpServer::new(service));

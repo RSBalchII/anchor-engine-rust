@@ -1,14 +1,17 @@
-//! GitHub Service - Fetch and extract repository tarballs.
+//! GitHub Service - Fetch and extract repository tarballs with full metadata.
 //!
 //! This service provides:
 //! 1. Secure credential storage (Windows Credential Manager / macOS Keychain / Linux libsecret)
 //! 2. Fetching tarballs from GitHub (public or private repos)
 //! 3. Extracting tarballs to external-inbox directory
-//! 4. Tracking repository metadata
+//! 4. Fetching rich metadata (issues, PRs, contributors, releases)
+//! 5. Generating YAML context files
+//! 6. Commit history with authors
+//! 7. Incremental update support
 
 use std::path::{Path, PathBuf};
 use std::fs;
-use std::io::{self, Read, Write};
+use std::io::{self, Read};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use flate2::read::GzDecoder;
@@ -16,6 +19,8 @@ use tar::Archive;
 use thiserror::Error;
 use tracing::{info, warn, error, debug};
 use keyring::Entry;
+use serde::{Deserialize, Serialize};
+use chrono::Utc;
 
 /// GitHub service errors.
 #[derive(Error, Debug)]
@@ -177,6 +182,102 @@ pub struct CredentialStatus {
     pub message: String,
 }
 
+// ============================================================================
+// GitHub Metadata Structures (like Node.js Octokit responses)
+// ============================================================================
+
+/// GitHub Issue metadata.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GitHubIssue {
+    pub number: i64,
+    pub title: String,
+    pub body: Option<String>,
+    pub state: String,
+    pub labels: Vec<String>,
+    pub author: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+    pub comments: i64,
+}
+
+/// GitHub Pull Request metadata.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GitHubPullRequest {
+    pub number: i64,
+    pub title: String,
+    pub body: Option<String>,
+    pub state: String,
+    pub author: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+    pub merged: bool,
+    pub merged_at: Option<String>,
+    pub additions: i64,
+    pub deletions: i64,
+    pub changed_files: i64,
+}
+
+/// GitHub Contributor metadata.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GitHubContributor {
+    pub login: String,
+    pub contributions: i64,
+    pub avatar_url: String,
+}
+
+/// GitHub Release metadata.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GitHubRelease {
+    pub tag_name: String,
+    pub name: Option<String>,
+    pub body: Option<String>,
+    pub author: Option<String>,
+    pub published_at: String,
+    pub is_prerelease: bool,
+}
+
+/// Commit information.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CommitInfo {
+    pub hash: String,
+    pub message: String,
+    pub author: String,
+    pub author_email: Option<String>,
+    pub date: String,
+    pub committer: String,
+}
+
+/// Full GitHub repository metadata.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GitHubMetadata {
+    pub issues: Vec<GitHubIssue>,
+    pub pull_requests: Vec<GitHubPullRequest>,
+    pub contributors: Vec<GitHubContributor>,
+    pub releases: Vec<GitHubRelease>,
+    pub commits: Vec<CommitInfo>,
+    pub last_fetched: String,
+}
+
+/// Ingestion summary (saved to JSON for incremental updates).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IngestionSummary {
+    pub repo: String,
+    pub branch: String,
+    pub tarball: String,
+    pub last_ingestion: String,
+    pub commit_hash: String,
+    pub metadata: IngestionMetadata,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IngestionMetadata {
+    pub issues: i64,
+    pub pull_requests: i64,
+    pub contributors: i64,
+    pub releases: i64,
+    pub commits: i64,
+}
+
 impl TrackedRepo {
     /// Create a new tracked repo.
     pub fn new(repo: GitHubRepo, sync_interval_secs: u64) -> Self {
@@ -298,6 +399,264 @@ impl GitHubService {
         }
     }
     
+    // ========================================================================
+    // Metadata Fetching (Like Node.js Octokit)
+    // ========================================================================
+
+    /// Fetch full repository metadata including issues, PRs, contributors, releases, and commits.
+    pub async fn fetch_metadata(&self, owner: &str, repo: &str, token: Option<&str>, since: Option<&str>) -> Result<GitHubMetadata> {
+        info!("📊 Fetching GitHub metadata for {}/{}", owner, repo);
+        
+        let issues = self.fetch_issues(owner, repo, token, since).await?;
+        let pull_requests = self.fetch_pull_requests(owner, repo, token).await?;
+        let contributors = self.fetch_contributors(owner, repo, token).await?;
+        let releases = self.fetch_releases(owner, repo, token).await?;
+        let commits = self.fetch_commits(owner, repo, token, since).await?;
+        
+        Ok(GitHubMetadata {
+            issues,
+            pull_requests,
+            contributors,
+            releases,
+            commits,
+            last_fetched: Utc::now().to_rfc3339(),
+        })
+    }
+
+    /// Fetch issues from GitHub API.
+    async fn fetch_issues(&self, owner: &str, repo: &str, token: Option<&str>, since: Option<&str>) -> Result<Vec<GitHubIssue>> {
+        let mut url = format!("https://api.github.com/repos/{}/{}/issues?state=all&per_page=100", owner, repo);
+        if let Some(since_date) = since {
+            url.push_str(&format!("&since={}", since_date));
+        }
+        
+        let mut request = self.client.get(&url);
+        if let Some(t) = token {
+            request = request.header("Authorization", format!("token {}", t));
+        }
+        request = request.header("User-Agent", "anchor-engine-rust");
+        
+        let response = request.send().await?;
+        if !response.status().is_success() {
+            warn!("⚠️  Issues fetch failed: {}", response.status());
+            return Ok(Vec::new());
+        }
+        
+        let issues: Vec<serde_json::Value> = response.json().await?;
+        Ok(issues.into_iter().map(|i| GitHubIssue {
+            number: i["number"].as_i64().unwrap_or(0),
+            title: i["title"].as_str().unwrap_or("").to_string(),
+            body: i["body"].as_str().map(|s| s.to_string()),
+            state: i["state"].as_str().unwrap_or("").to_string(),
+            labels: i["labels"].as_array()
+                .map(|arr| arr.iter().filter_map(|l| l["name"].as_str()).map(|s| s.to_string()).collect())
+                .unwrap_or_default(),
+            author: i["user"]["login"].as_str().map(|s| s.to_string()),
+            created_at: i["created_at"].as_str().unwrap_or("").to_string(),
+            updated_at: i["updated_at"].as_str().unwrap_or("").to_string(),
+            comments: i["comments"].as_i64().unwrap_or(0),
+        }).collect())
+    }
+
+    /// Fetch pull requests from GitHub API.
+    async fn fetch_pull_requests(&self, owner: &str, repo: &str, token: Option<&str>) -> Result<Vec<GitHubPullRequest>> {
+        let url = format!("https://api.github.com/repos/{}/{}/pulls?state=all&per_page=100&sort=updated&direction=desc", owner, repo);
+        let mut request = self.client.get(&url);
+        if let Some(t) = token {
+            request = request.header("Authorization", format!("token {}", t));
+        }
+        request = request.header("User-Agent", "anchor-engine-rust");
+        
+        let response = request.send().await?;
+        if !response.status().is_success() {
+            warn!("⚠️  PRs fetch failed: {}", response.status());
+            return Ok(Vec::new());
+        }
+        
+        let prs: Vec<serde_json::Value> = response.json().await?;
+        Ok(prs.into_iter().map(|p| GitHubPullRequest {
+            number: p["number"].as_i64().unwrap_or(0),
+            title: p["title"].as_str().unwrap_or("").to_string(),
+            body: p["body"].as_str().map(|s| s.to_string()),
+            state: p["state"].as_str().unwrap_or("").to_string(),
+            author: p["user"]["login"].as_str().map(|s| s.to_string()),
+            created_at: p["created_at"].as_str().unwrap_or("").to_string(),
+            updated_at: p["updated_at"].as_str().unwrap_or("").to_string(),
+            merged: p["merged_at"].as_str().is_some(),
+            merged_at: p["merged_at"].as_str().map(|s| s.to_string()),
+            additions: p["additions"].as_i64().unwrap_or(0),
+            deletions: p["deletions"].as_i64().unwrap_or(0),
+            changed_files: p["changed_files"].as_i64().unwrap_or(0),
+        }).collect())
+    }
+
+    /// Fetch contributors from GitHub API.
+    async fn fetch_contributors(&self, owner: &str, repo: &str, token: Option<&str>) -> Result<Vec<GitHubContributor>> {
+        let url = format!("https://api.github.com/repos/{}/{}/contributors?per_page=100", owner, repo);
+        let mut request = self.client.get(&url);
+        if let Some(t) = token {
+            request = request.header("Authorization", format!("token {}", t));
+        }
+        request = request.header("User-Agent", "anchor-engine-rust");
+        
+        let response = request.send().await?;
+        if !response.status().is_success() {
+            warn!("⚠️  Contributors fetch failed: {}", response.status());
+            return Ok(Vec::new());
+        }
+        
+        let contributors: Vec<serde_json::Value> = response.json().await?;
+        Ok(contributors.into_iter().map(|c| GitHubContributor {
+            login: c["login"].as_str().unwrap_or("").to_string(),
+            contributions: c["contributions"].as_i64().unwrap_or(0),
+            avatar_url: c["avatar_url"].as_str().unwrap_or("").to_string(),
+        }).collect())
+    }
+
+    /// Fetch releases from GitHub API.
+    async fn fetch_releases(&self, owner: &str, repo: &str, token: Option<&str>) -> Result<Vec<GitHubRelease>> {
+        let url = format!("https://api.github.com/repos/{}/{}/releases?per_page=50", owner, repo);
+        let mut request = self.client.get(&url);
+        if let Some(t) = token {
+            request = request.header("Authorization", format!("token {}", t));
+        }
+        request = request.header("User-Agent", "anchor-engine-rust");
+        
+        let response = request.send().await?;
+        if !response.status().is_success() {
+            warn!("⚠️  Releases fetch failed: {}", response.status());
+            return Ok(Vec::new());
+        }
+        
+        let releases: Vec<serde_json::Value> = response.json().await?;
+        Ok(releases.into_iter().map(|r| GitHubRelease {
+            tag_name: r["tag_name"].as_str().unwrap_or("").to_string(),
+            name: r["name"].as_str().map(|s| s.to_string()),
+            body: r["body"].as_str().map(|s| s.to_string()),
+            author: r["author"]["login"].as_str().map(|s| s.to_string()),
+            published_at: r["published_at"].as_str().unwrap_or("").to_string(),
+            is_prerelease: r["prerelease"].as_bool().unwrap_or(false),
+        }).collect())
+    }
+
+    /// Fetch commits from GitHub API.
+    async fn fetch_commits(&self, owner: &str, repo: &str, token: Option<&str>, since: Option<&str>) -> Result<Vec<CommitInfo>> {
+        let mut url = format!("https://api.github.com/repos/{}/{}/commits?per_page=100", owner, repo);
+        if let Some(since_date) = since {
+            url.push_str(&format!("&since={}", since_date));
+        }
+        
+        let mut request = self.client.get(&url);
+        if let Some(t) = token {
+            request = request.header("Authorization", format!("token {}", t));
+        }
+        request = request.header("User-Agent", "anchor-engine-rust");
+        
+        let response = request.send().await?;
+        if !response.status().is_success() {
+            warn!("⚠️  Commits fetch failed: {}", response.status());
+            return Ok(Vec::new());
+        }
+        
+        let commits: Vec<serde_json::Value> = response.json().await?;
+        Ok(commits.into_iter().map(|c| CommitInfo {
+            hash: c["sha"].as_str().unwrap_or("").to_string(),
+            message: c["commit"]["message"].as_str().unwrap_or("").to_string(),
+            author: c["commit"]["author"]["name"].as_str().unwrap_or("").to_string(),
+            author_email: c["commit"]["author"]["email"].as_str().map(|s| s.to_string()),
+            date: c["commit"]["author"]["date"].as_str().unwrap_or("").to_string(),
+            committer: c["commit"]["committer"]["name"].as_str().unwrap_or("").to_string(),
+        }).collect())
+    }
+
+    /// Generate YAML context file from metadata.
+    pub fn generate_yaml_context(
+        &self,
+        repo: &str,
+        branch: &str,
+        commit_info: &CommitInfo,
+        metadata: &GitHubMetadata,
+        output_path: &Path,
+    ) -> Result<PathBuf> {
+        info!("📝 Generating YAML context...");
+        
+        let parts: Vec<&str> = repo.split('/').collect();
+        let owner = parts.get(0).unwrap_or(&"unknown");
+        let repo_name = parts.get(1).unwrap_or(&"unknown");
+        
+        let yaml_content = format!(
+r#"# GitHub Repository: {}
+# Branch: {}
+# Ingested: {}
+# Commit: {} by {} on {}
+
+project: {}
+owner: {}
+repository: {}
+branch: {}
+commit: {}
+commit_date: {}
+commit_author: {}
+ingested_at: {}
+
+# Contributors ({})
+contributors:
+{}
+
+# Recent Issues ({})
+issues:
+{}
+
+# Recent Pull Requests ({})
+pull_requests:
+{}
+
+# Releases ({})
+releases:
+{}
+
+# Repository Statistics
+stats:
+  total_issues: {}
+  total_pull_requests: {}
+  total_contributors: {}
+  total_releases: {}
+  total_commits: {}
+  open_issues: {}
+  merged_prs: {}
+
+# Metadata (full JSON)
+metadata_json: |
+  {}
+"#,
+            repo, branch, Utc::now().to_rfc3339(),
+            commit_info.hash, commit_info.author, commit_info.date,
+            repo_name, owner, repo, branch,
+            commit_info.hash, commit_info.date, commit_info.author,
+            Utc::now().to_rfc3339(),
+            metadata.contributors.len(),
+            metadata.contributors.iter().take(20).map(|c| format!("  - {}: {} contributions", c.login, c.contributions)).collect::<Vec<_>>().join("\n"),
+            metadata.issues.len(),
+            metadata.issues.iter().take(50).map(|i| format!("  - #{}: {} [{}] by {}", i.number, i.title, i.state, i.author.as_deref().unwrap_or("unknown"))).collect::<Vec<_>>().join("\n"),
+            metadata.pull_requests.len(),
+            metadata.pull_requests.iter().take(50).map(|p| format!("  - #{}: {} [{}]{} by {}", p.number, p.title, p.state, if p.merged { " (merged)" } else { "" }, p.author.as_deref().unwrap_or("unknown"))).collect::<Vec<_>>().join("\n"),
+            metadata.releases.len(),
+            metadata.releases.iter().take(20).map(|r| format!("  - {}: {} ({})", r.tag_name, r.name.as_deref().unwrap_or("Untitled"), r.published_at)).collect::<Vec<_>>().join("\n"),
+            metadata.issues.len(),
+            metadata.pull_requests.len(),
+            metadata.contributors.len(),
+            metadata.releases.len(),
+            metadata.commits.len(),
+            metadata.issues.iter().filter(|i| i.state == "open").count(),
+            metadata.pull_requests.iter().filter(|p| p.merged).count(),
+            serde_json::to_string_pretty(metadata).unwrap_or_default()
+        );
+        
+        fs::write(output_path, &yaml_content)?;
+        info!("✅ Generated YAML context: {:?}", output_path);
+        Ok(output_path.to_path_buf())
+    }
+
     /// Fetch and extract a GitHub repository.
     ///
     /// # Arguments

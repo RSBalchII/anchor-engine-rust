@@ -21,8 +21,8 @@ echo.
 echo 📦 Starting Anchor Engine...
 echo.
 
-REM Start the engine
-cargo run -- --port 3160
+REM Start the engine (specify binary to avoid ambiguity)
+cargo run --bin anchor-engine -- --port 3160
 
 if errorlevel 1 (
     echo.

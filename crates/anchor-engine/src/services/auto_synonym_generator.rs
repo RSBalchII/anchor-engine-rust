@@ -8,7 +8,6 @@
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::Path;
-use serde::{Serialize, Deserialize};
 use tracing::{info, warn, error};
 
 /// Synonym ring type for auto-generated synonyms

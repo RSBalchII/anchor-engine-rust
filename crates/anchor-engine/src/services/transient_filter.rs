@@ -13,7 +13,8 @@
 //! # Usage
 //!
 //! ```rust
-//! use anchor_engine::services::transient_filter::{TransientFilter, TransientFilterConfig};
+//! use anchor_engine::services::transient_filter::TransientFilter;
+//! use anchor_engine::config::TransientFilterConfig;
 //!
 //! let config = TransientFilterConfig::default();
 //! let filter = TransientFilter::new(config);
@@ -24,25 +25,7 @@
 
 use once_cell::sync::Lazy;
 use regex::Regex;
-
-/// Configuration for transient filter
-#[derive(Debug, Clone)]
-pub struct TransientFilterConfig {
-    /// Minimum number of lines to consider for filtering
-    pub min_lines: usize,
-    /// Threshold for transient content (0.0-1.0)
-    /// If >50% lines match transient patterns, skip entire document
-    pub threshold: f64,
-}
-
-impl Default for TransientFilterConfig {
-    fn default() -> Self {
-        Self {
-            min_lines: 5,
-            threshold: 0.5,
-        }
-    }
-}
+use crate::config::TransientFilterConfig;
 
 /// Transient data filter
 pub struct TransientFilter {

@@ -35,11 +35,15 @@ tar = "0.4"
 thiserror = "1.0"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-appender = "0.2"
 chrono = { version = "0.4", features = ["serde"] }
 uuid = { version = "1.0", features = ["v4", "serde"] }
 once_cell = "1.19"
 ignore = "0.4.25"
 regex = "1.10"
+
+# Error handling
+anyhow = "1.0"
 
 # Secure credential storage
 keyring = "2.3"
@@ -48,6 +52,12 @@ keyring = "2.3"
 hmac = "0.12"
 sha2 = "0.10"
 base64 = "0.21"
+
+# YAML generation for GitHub context
+serde_yaml = "0.9"
+
+# Git operations (optional, for advanced features)
+git2 = { version = "0.18", optional = true }
 
 [dev-dependencies]
 tempfile = "3.0"

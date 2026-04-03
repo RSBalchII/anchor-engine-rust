@@ -1,83 +1,196 @@
 # Lessons Learned - Rust Implementation
 
-## What Went Well
+## Session: GitHub Integration (April 1, 2026)
 
-### 1. Modular Package Structure
-- Separating core algorithms into standalone crates worked perfectly
-- Each package can be tested, benchmarked, and published independently
-- Clear API boundaries made integration straightforward
+### What Went Well
 
-### 2. Test-Driven Development
-- 172 tests for core packages gave us confidence
-- Catches regressions immediately
-- Documentation examples double as tests
+#### 1. DTO Pattern for External Data
+**Problem**: GitHub's API payloads are deeply nested and ever-changing
 
-### 3. Rust's Type System
-- Caught many errors at compile time
-- Ownership model prevents data races
-- Serde integration seamless
-
-## Challenges & Solutions
-
-### 1. Thread Safety with SQLite
-
-**Problem**: `rusqlite::Connection` is not `Send + Sync`
-
-**Attempted Solutions**:
-- ❌ `Arc<Connection>` - Doesn't work (Connection not Sync)
-- ❌ `Arc<RwLock<Connection>>` - Overkill for our use case
-- ✅ `Arc<Mutex<Connection>>` - Simple and effective
+**Solution**: Data Transfer Object pattern with custom Axum extractor
 
 **Code Pattern**:
 ```rust
-pub struct Database {
-    conn: Arc<Mutex<Connection>>,
+// Define simplified DTO
+pub struct GithubIngestDto {
+    pub repo_url: String,
+    pub branch: String,
+    pub owner: String,
+    pub repo_name: String,
 }
 
-impl Database {
-    pub async fn insert_atom(&self, atom: &Atom) -> Result<u64> {
-        let mut conn = self.conn.lock().await;
-        // ... operations
+// Custom FromRequest extractor
+#[async_trait]
+impl<S> FromRequest<S> for GithubIngestDto {
+    async fn from_request(req: Request, _state: &S) -> Result<Self, Self::Rejection> {
+        // 1. Read raw bytes
+        // 2. Parse to serde_json::Value (flexible)
+        // 3. Extract only needed fields
+        // 4. Return validated DTO
     }
 }
 ```
 
-**Lesson**: For single-connection SQLite, `tokio::sync::Mutex` is sufficient. 
-For high-concurrency, use `r2d2_sqlite` connection pool.
+**Benefits**:
+- Isolates internal logic from external schema changes
+- Clear validation errors at boundary
+- Simplifies handler signatures
+- Immune to GitHub API changes
 
-### 2. Axum Handler Type Errors
+**Lesson**: Always use DTOs for external data ingestion.
 
-**Problem**: Handler functions didn't satisfy `Handler` trait bounds
+#### 2. Secure Credential Storage
+**Problem**: GitHub PAT tokens must be stored securely, never logged
 
-**Symptoms**:
-```
-error[E0277]: the trait bound `fn(...) -> ...: Handler<_, _>` is not satisfied
-```
-
-**Solution**:
-- Add `#[axum::debug_handler]` macro to all handlers
-- Ensure handlers return `Json<T>` not just `T`
-- Use proper extractor types (`State`, `Json`, etc.)
+**Solution**: `keyring` crate for OS-managed encrypted storage
 
 **Code Pattern**:
 ```rust
-use axum::debug_handler;
+use keyring::Entry;
 
-#[debug_handler]
-async fn health_check(
-    State(state): State<SharedState>,
-) -> Json<HealthResponse> {
+pub struct GitHubService {
+    credential_entry: Entry,
     // ...
+}
+
+impl GitHubService {
+    pub fn store_credentials(&self, token: &str) -> Result<()> {
+        self.credential_entry.set_password(token)?;
+        Ok(())
+    }
+    
+    pub fn get_credentials(&self) -> Option<String> {
+        // Try secure storage first
+        self.credential_entry.get_password().ok()
+            // Fallback to environment variable
+            .or_else(|| std::env::var("GITHUB_TOKEN").ok())
+    }
 }
 ```
 
-### 3. Iterator Collect Type Inference
+**Benefits**:
+- Windows Credential Manager / macOS Keychain / Linux libsecret
+- Token never logged or serialized
+- AI-agent safe (MCP tools abstract token away)
+- Environment variable fallback for CLI users
 
-**Problem**: `query_map().collect()` couldn't infer error type
+**Lesson**: Use OS-managed credential storage for secrets, never plaintext.
 
-**Symptoms**:
+#### 3. Octokit-style Metadata Fetching
+**Problem**: Need rich GitHub metadata (issues, PRs, contributors) like Node.js version
+
+**Solution**: Direct GitHub REST API calls with flexible JSON parsing
+
+**Code Pattern**:
+```rust
+async fn fetch_issues(&self, owner: &str, repo: &str, token: Option<&str>) -> Result<Vec<GitHubIssue>> {
+    let url = format!("https://api.github.com/repos/{}/{}/issues?state=all&per_page=100", owner, repo);
+    let mut request = self.client.get(&url);
+    if let Some(t) = token {
+        request = request.header("Authorization", format!("token {}", t));
+    }
+    
+    let response = request.send().await?;
+    let issues: Vec<serde_json::Value> = response.json().await?;
+    
+    // Map flexible JSON to strongly-typed structs
+    Ok(issues.into_iter().map(|i| GitHubIssue {
+        number: i["number"].as_i64().unwrap_or(0),
+        title: i["title"].as_str().unwrap_or("").to_string(),
+        // ... with safe defaults
+    }).collect())
+}
 ```
-error[E0277]: a value of type `Result<Vec<T>, DbError>` cannot be built 
+
+**Benefits**:
+- Feature-parity with Node.js Octokit
+- Graceful handling of missing fields
+- Works with public and private repos
+- Respects rate limits
+
+**Lesson**: Use flexible JSON parsing with safe defaults for external APIs.
+
+#### 4. YAML Context Generation
+**Problem**: Need comprehensive summary file for Anchor Engine ingestion
+
+**Solution**: `serde_yaml` crate with formatted string templates
+
+**Code Pattern**:
+```rust
+pub fn generate_yaml_context(
+    &self,
+    repo: &str,
+    branch: &str,
+    commit_info: &CommitInfo,
+    metadata: &GitHubMetadata,
+    output_path: &Path,
+) -> Result<PathBuf> {
+    let yaml_content = format!(
+r#"# GitHub Repository: {}
+project: {}
+contributors:
+{}
+issues:
+{}
+stats:
+  total_issues: {}
+  total_pull_requests: {}
+"#,
+        repo,
+        // ... with formatted lists
+    );
+    
+    fs::write(output_path, &yaml_content)?;
+    Ok(output_path.to_path_buf())
+}
+```
+
+**Benefits**:
+- Human-readable summary
+- Machine-parseable YAML
+- Includes all metadata
+- Auto-ingested by Watchdog
+
+**Lesson**: Generate both human-readable and machine-parseable outputs.
+
+#### 5. Incremental Update Support
+**Problem**: Re-fetching entire repo on every update is wasteful
+
+**Solution**: Track last ingestion date, fetch only new data
+
+**Code Pattern**:
+```rust
+// Save ingestion summary
+let summary = IngestionSummary {
+    last_ingestion: Utc::now().to_rfc3339(),
+    commit_hash: commit_info.hash.clone(),
+    // ...
+};
+fs::write("INGEST_SUMMARY.json", serde_json::to_string(&summary)?)?;
+
+// Next time, check for incremental update
+let since: Option<String> = if incremental {
+    let summary = load_summary()?;
+    Some(summary.last_ingestion)
+} else {
+    None
+};
+
+// Pass to GitHub API
+let commits = fetch_commits(owner, repo, token, since.as_deref()).await?;
+```
+
+**Benefits**:
+- Faster updates (only new data)
+- Lower API rate limit usage
+- Preserves bandwidth
+- Transparent to user
+
+**Lesson**: Always support incremental updates for recurring operations.
+
+---
+
+## Previous Lessons (February 2026)
               from an iterator over elements of type `Result<T, rusqlite::Error>`
 ```
 

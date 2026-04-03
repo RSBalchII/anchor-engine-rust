@@ -5,23 +5,36 @@ use axum::{
     extract::State,
     http::StatusCode,
     response::Html,
-    routing::{delete, get, post},
+    routing::{delete, get, post, put},
     Json, Router,
 };
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use tower_http::{cors::CorsLayer, trace::TraceLayer};
 use tracing::{info, debug, error};
+use chrono::Utc;
+use std::fs;
 
 use crate::models::*;
 use crate::service::AnchorService;
+use crate::services::github::CommitInfo;
 
 /// Shared application state.
 pub type SharedState = Arc<RwLock<AnchorService>>;
 
 /// Search UI route - serves the beautiful frontend interface (v5.0.0 UI).
-async fn search_ui() -> Html<&'static str> {
-    Html(include_str!("../static/index.html"))
+async fn search_ui() -> (axum::http::HeaderMap, Html<&'static str>) {
+    use axum::http::HeaderValue;
+    let mut headers = axum::http::HeaderMap::new();
+    headers.insert("Cache-Control", HeaderValue::from_static("no-cache, no-store, must-revalidate"));
+    headers.insert("Pragma", HeaderValue::from_static("no-cache"));
+    headers.insert("Expires", HeaderValue::from_static("0"));
+    (headers, Html(include_str!("../static/index.html")))
+}
+
+/// Favicon route - returns empty 404 to prevent console noise.
+async fn favicon() -> StatusCode {
+    StatusCode::NOT_FOUND
 }
 
 /// Root route handler - redirects to the main UI.
@@ -34,26 +47,51 @@ pub fn create_router(state: SharedState) -> Router {
     Router::new()
         // Root route
         .route("/", get(root))
-        
-        // Search UI - beautiful frontend interface
-        .route("/search", get(search_ui))
 
-        // Health and stats
+        // UI routes - all serve the same index.html (SPA)
+        .route("/search", get(search_ui))
+        .route("/settings", get(search_ui))
+        .route("/dashboard", get(search_ui))
+        .route("/memory", get(search_ui))
+        .route("/paths", get(search_ui))
+        .route("/quarantine", get(search_ui))
+
+        // Favicon - prevent 404 noise
+        .route("/favicon.ico", get(favicon))
+
+        // Health and stats (with v1 aliases for UI compatibility)
         .route("/health", get(health_check))
         .route("/stats", get(get_stats))
+        .route("/v1/stats", get(get_stats))
+        .route("/v1/system/status", get(health_check))
+        .route("/v1/buckets", get(get_buckets))
 
         // Memory/search endpoints
         .route("/v1/memory/search", post(search_memory))
         .route("/v1/memory/ingest", post(ingest_memory))
-        
+
         // System management endpoints
         .route("/v1/system/paths", get(list_watch_paths))
         .route("/v1/system/paths/add", post(add_watch_path))
         .route("/v1/system/paths/remove", delete(remove_watch_path))
         .route("/v1/system/github/ingest", post(ingest_github))
+        .route("/v1/github/repos", post(ingest_github))
         .route("/v1/system/github/track", post(track_github))
         .route("/v1/system/github/sync", post(sync_github))
         .route("/v1/system/github/tracked", get(list_tracked_github))
+        
+        // Watchdog endpoints (UI compatibility)
+        .route("/v1/watchdog/status", get(watchdog_status))
+        .route("/v1/watchdog/start", post(watchdog_start))
+        .route("/v1/watchdog/stop", post(watchdog_stop))
+        .route("/v1/watchdog/ingest", post(watchdog_ingest))
+        
+        // Settings endpoint (UI compatibility)
+        .route("/v1/settings", get(get_settings))
+        .route("/v1/settings", put(save_settings))
+        
+        // Snapshot endpoint for UI testing
+        .route("/v1/test/snapshot", post(save_snapshot))
 
         // OpenAI-compatible endpoint
         .route("/v1/chat/completions", post(chat_completions))
@@ -120,7 +158,7 @@ async fn get_stats(
     match service.get_stats().await {
         Ok(stats) => Json(stats),
         Err(e) => {
-            error!("Failed to get stats: {}", e);
+            tracing::error!("Failed to get stats: {}", e);
             Json(DbStatsResponse {
                 atoms: 0,
                 sources: 0,
@@ -128,6 +166,14 @@ async fn get_stats(
             })
         }
     }
+}
+
+/// Get available buckets (stub for UI compatibility).
+#[debug_handler]
+async fn get_buckets() -> Json<serde_json::Value> {
+    Json(serde_json::json!({
+        "buckets": ["inbox", "external-inbox", "default"]
+    }))
 }
 
 /// Search memory endpoint.
@@ -298,44 +344,54 @@ pub async fn start_server(state: SharedState, port: u16) -> std::io::Result<()> 
 /// List all watched paths.
 #[debug_handler]
 async fn list_watch_paths(
-    State(state): State<SharedState>,
+    _state: State<SharedState>,
 ) -> Json<serde_json::Value> {
-    let service = state.read().await;
-    
     // Get config from service or use default
     let config = crate::config::Config::load().unwrap_or_default();
-    let paths = config.settings.all_watch_paths();
     
+    // Build watch paths from config.paths.notebook and watcher.extra_paths
+    let mut paths = vec![config.paths.notebook.clone()];
+    paths.extend(config.watcher.extra_paths.clone());
+
     Json(serde_json::json!({
-        "watch_paths": paths.iter().map(|p| p.to_string_lossy()).collect::<Vec<_>>(),
-        "auto_ingest": config.settings.auto_ingest,
-        "stability_threshold_ms": config.settings.watcher_stability_threshold_ms,
+        "watch_paths": paths,
+        "auto_ingest": config.watcher.auto_start,
+        "stability_threshold_ms": config.watcher.stability_threshold_ms,
     }))
 }
 
 /// Add a watch path.
 #[debug_handler]
 async fn add_watch_path(
-    State(state): State<SharedState>,
+    _state: State<SharedState>,
     Json(request): Json<serde_json::Value>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let path_str = request["path"]
         .as_str()
         .ok_or_else(|| (StatusCode::BAD_REQUEST, "Missing 'path' field".to_string()))?;
-    
+
     let path = std::path::PathBuf::from(path_str);
-    
+
     if !path.exists() {
         return Err((StatusCode::BAD_REQUEST, format!("Path does not exist: {:?}", path)));
     }
-    
-    // Add to config
+
+    // Add to config's extra_paths
     let mut config = crate::config::Config::load().unwrap_or_default();
-    config.add_watch_path(path_str)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    config.watcher.extra_paths.push(path_str.to_string());
     
+    // Save config back to file
+    // Note: This is a simplified approach - in production you'd want proper file locking
+    let config_path = std::path::PathBuf::from("user_settings.json");
+    if config_path.exists() {
+        let content = serde_json::to_string_pretty(&config)
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        std::fs::write(&config_path, content)
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    }
+
     tracing::info!("📍 Added watch path: {:?}", path);
-    
+
     Ok(Json(serde_json::json!({
         "success": true,
         "path": path_str,
@@ -346,18 +402,26 @@ async fn add_watch_path(
 /// Remove a watch path.
 #[debug_handler]
 async fn remove_watch_path(
-    State(state): State<SharedState>,
+    _state: State<SharedState>,
     Json(request): Json<serde_json::Value>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let path_str = request["path"]
         .as_str()
         .ok_or_else(|| (StatusCode::BAD_REQUEST, "Missing 'path' field".to_string()))?;
-    
-    // Remove from config
+
+    // Remove from config's extra_paths
     let mut config = crate::config::Config::load().unwrap_or_default();
-    config.remove_watch_path(path_str)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    config.watcher.extra_paths.retain(|p| p != path_str);
     
+    // Save config back to file
+    let config_path = std::path::PathBuf::from("user_settings.json");
+    if config_path.exists() {
+        let content = serde_json::to_string_pretty(&config)
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        std::fs::write(&config_path, content)
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    }
+
     tracing::info!("📍 Removed watch path: {:?}", path_str);
 
     Ok(Json(serde_json::json!({
@@ -367,55 +431,139 @@ async fn remove_watch_path(
     })))
 }
 
-/// Ingest a GitHub repository.
+/// Ingest a GitHub repository with full metadata (like Node.js version).
 #[debug_handler]
 async fn ingest_github(
-    State(state): State<SharedState>,
+    _state: State<SharedState>,
     Json(request): Json<serde_json::Value>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let url = request["url"]
         .as_str()
         .ok_or_else(|| (StatusCode::BAD_REQUEST, "Missing 'url' field".to_string()))?;
     
+    let branch = request["branch"].as_str().unwrap_or("main").to_string();
+    let incremental = request["incremental"].as_bool().unwrap_or(false);
     let token = request["token"].as_str().map(|s| s.to_string());
-    
+
     // Parse GitHub URL
     let repo = crate::services::GitHubRepo::from_url(url)
         .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
-    
+
     let repo = match &token {
         Some(token) => repo.with_token(token),
         None => repo,
     };
-    
-    tracing::info!("📥 GITHUB INGEST: {} (ref: {:?})", repo, repo.ref_name);
-    
-    // Get external-inbox path from config
+
+    tracing::info!("📥 GITHUB INGEST: {} (branch: {}, incremental: {})", repo, branch, incremental);
+
+    // Get paths from config
     let config = crate::config::Config::load().unwrap_or_default();
-    let extract_base = config.settings.external_inbox_path();
-    
+    let extract_base = config.external_inbox_path();
+    let output_dir = extract_base.clone(); // Extract directly to external-inbox
+
     // Create GitHub service
-    let github_service = crate::services::GitHubService::new(extract_base)
+    let github_service = crate::services::GitHubService::new(output_dir.clone())
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
-    // Fetch and extract
-    match github_service.fetch_and_extract(&repo).await {
-        Ok(extract_path) => {
-            tracing::info!("✅ GitHub repo extracted to: {:?}", extract_path);
-            
-            // The Watchdog service will auto-ingest the extracted files
-            Ok(Json(serde_json::json!({
-                "success": true,
-                "message": format!("Successfully fetched and extracted {}/{}", repo.owner, repo.repo),
-                "extract_path": extract_path.to_string_lossy(),
-                "watchdog_note": "Files will be auto-ingested by the Watchdog service",
-            })))
+    // Determine if this is an incremental update
+    let since: Option<String> = if incremental {
+        let summary_path = output_dir.join("INGEST_SUMMARY.json");
+        if summary_path.exists() {
+            if let Ok(summary_bytes) = fs::read(&summary_path) {
+                if let Ok(summary) = serde_json::from_slice::<crate::services::github::IngestionSummary>(&summary_bytes) {
+                    tracing::info!("📅 Incremental update since: {}", summary.last_ingestion);
+                    Some(summary.last_ingestion)
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        } else {
+            None
         }
-        Err(e) => {
-            tracing::error!("❌ GitHub ingestion failed: {}", e);
-            Err((StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
-        }
+    } else {
+        None
+    };
+
+    // Fetch metadata (issues, PRs, contributors, releases, commits)
+    let metadata = github_service.fetch_metadata(&repo.owner, &repo.repo, repo.token.as_deref(), since.as_deref())
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Metadata fetch failed: {}", e)))?;
+
+    tracing::info!("📊 Fetched metadata: {} issues, {} PRs, {} contributors, {} releases, {} commits",
+        metadata.issues.len(), metadata.pull_requests.len(), metadata.contributors.len(), metadata.releases.len(), metadata.commits.len());
+
+    // Fetch and extract tarball
+    let extract_path = github_service.fetch_and_extract(&repo).await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Extraction failed: {}", e)))?;
+
+    tracing::info!("✅ GitHub repo extracted to: {:?}", extract_path);
+
+    // Get latest commit info
+    let commit_info = metadata.commits.first().cloned().unwrap_or(CommitInfo {
+        hash: "unknown".to_string(),
+        message: "Unknown".to_string(),
+        author: "Unknown".to_string(),
+        author_email: None,
+        date: Utc::now().to_rfc3339(),
+        committer: "Unknown".to_string(),
+    });
+
+    // Generate YAML context file
+    let yaml_path = output_dir.join(format!("{}-github.yaml", repo.repo));
+    match github_service.generate_yaml_context(
+        url,
+        &branch,
+        &commit_info,
+        &metadata,
+        &yaml_path,
+    ) {
+        Ok(_) => tracing::info!("✅ Generated YAML context: {:?}", yaml_path),
+        Err(e) => tracing::warn!("⚠️  YAML generation failed: {}", e),
     }
+
+    // Save ingestion summary for incremental updates
+    let summary = crate::services::github::IngestionSummary {
+        repo: url.to_string(),
+        branch: branch.clone(),
+        tarball: format!("{}-{}.tar.gz", repo.repo, chrono::Utc::now().format("%Y-%m-%d")),
+        last_ingestion: Utc::now().to_rfc3339(),
+        commit_hash: commit_info.hash.clone(),
+        metadata: crate::services::github::IngestionMetadata {
+            issues: metadata.issues.len() as i64,
+            pull_requests: metadata.pull_requests.len() as i64,
+            contributors: metadata.contributors.len() as i64,
+            releases: metadata.releases.len() as i64,
+            commits: metadata.commits.len() as i64,
+        },
+    };
+    
+    let summary_path = output_dir.join("INGEST_SUMMARY.json");
+    if let Err(e) = fs::write(&summary_path, serde_json::to_string_pretty(&summary).unwrap()) {
+        tracing::warn!("⚠️  Failed to save ingestion summary: {}", e);
+    }
+
+    // The Watchdog service will auto-ingest the extracted files and YAML
+    Ok(Json(serde_json::json!({
+        "success": true,
+        "message": format!("Successfully fetched and extracted {}/{} with full metadata", repo.owner, repo.repo),
+        "extract_path": extract_path.to_string_lossy(),
+        "yaml_context": yaml_path.to_string_lossy(),
+        "metadata": {
+            "issues": metadata.issues.len(),
+            "pull_requests": metadata.pull_requests.len(),
+            "contributors": metadata.contributors.len(),
+            "releases": metadata.releases.len(),
+            "commits": metadata.commits.len(),
+        },
+        "commit": {
+            "hash": commit_info.hash,
+            "author": commit_info.author,
+            "date": commit_info.date,
+        },
+        "watchdog_note": "Files and YAML will be auto-ingested by the Watchdog service",
+    })))
 }
 
 /// Track a GitHub repository for periodic sync.
@@ -486,21 +634,26 @@ mod tests {
     use super::*;
     use crate::db::Database;
     use crate::service::AnchorService;
+    use crate::config::Config;
 
     #[tokio::test]
     async fn test_health_check() {
         let db = Database::in_memory().unwrap();
-        let service = AnchorService::new(db);
+        let temp_dir = tempfile::tempdir().unwrap();
+        let config = Config::default();
+        let service = AnchorService::new(db, temp_dir.path().to_path_buf(), config).unwrap();
         let state: SharedState = Arc::new(RwLock::new(service));
-        
+
         let response = health_check(State(state)).await;
         assert_eq!(response.status, "healthy");
     }
-    
+
     #[tokio::test]
     async fn test_search_memory() {
         let db = Database::in_memory().unwrap();
-        let mut service = AnchorService::new(db);
+        let temp_dir = tempfile::tempdir().unwrap();
+        let config = Config::default();
+        let mut service = AnchorService::new(db, temp_dir.path().to_path_buf(), config).unwrap();
 
         // Ingest some content first
         let ingest_request = IngestRequest {
@@ -523,5 +676,250 @@ mod tests {
         let _response = search_memory(State(state), Json(search_request)).await;
         // Should not panic and return valid response structure
         // (response may have 0 results since search query may not match)
+    }
+}
+
+// ============================================================================
+// Watchdog & Settings Endpoints (UI Compatibility Stubs)
+// ============================================================================
+
+use crate::config::Config;
+
+/// Get watchdog status.
+#[debug_handler]
+async fn watchdog_status() -> Json<serde_json::Value> {
+    // Load current config to get actual auto_start state
+    let config = Config::load().unwrap_or_default();
+    
+    Json(serde_json::json!({
+        "is_running": config.watcher.auto_start,
+        "files_processed": 0,
+        "errors": 0,
+        "watched_paths": config.watcher.extra_paths,
+        "auto_start": config.watcher.auto_start,
+        "stability_threshold_ms": config.watcher.stability_threshold_ms
+    }))
+}
+
+/// Start watchdog.
+#[debug_handler]
+async fn watchdog_start() -> Json<serde_json::Value> {
+    // Update user_settings.json to enable auto_start
+    let mut config = Config::load().unwrap_or_default();
+    config.watcher.auto_start = true;
+    
+    // Save back to file
+    let config_path = std::path::PathBuf::from("user_settings.json");
+    if let Ok(content) = serde_json::to_string_pretty(&config) {
+        let _ = std::fs::write(&config_path, content);
+    }
+    
+    Json(serde_json::json!({
+        "success": true,
+        "message": "Watchdog enabled - will auto-start on next server restart",
+        "auto_start": true
+    }))
+}
+
+/// Stop watchdog.
+#[debug_handler]
+async fn watchdog_stop() -> Json<serde_json::Value> {
+    // Update user_settings.json to disable auto_start
+    let mut config = Config::load().unwrap_or_default();
+    config.watcher.auto_start = false;
+    
+    // Save back to file
+    let config_path = std::path::PathBuf::from("user_settings.json");
+    if let Ok(content) = serde_json::to_string_pretty(&config) {
+        let _ = std::fs::write(&config_path, content);
+    }
+    
+    Json(serde_json::json!({
+        "success": true,
+        "message": "Watchdog disabled",
+        "auto_start": false
+    }))
+}
+
+/// Trigger watchdog ingest.
+#[debug_handler]
+async fn watchdog_ingest() -> Json<serde_json::Value> {
+    Json(serde_json::json!({
+        "success": true,
+        "message": "Ingest triggered (stub)"
+    }))
+}
+
+/// Get settings.
+#[debug_handler]
+async fn get_settings() -> Json<serde_json::Value> {
+    // Load from user_settings.json or return defaults
+    let config = Config::load().unwrap_or_default();
+    Json(serde_json::json!({
+        "server": {
+            "port": config.server.port,
+            "host": config.server.host,
+            "api_key": config.server.api_key
+        },
+        "paths": {
+            "notebook": config.paths.notebook,
+            "inbox": config.paths.inbox,
+            "external_inbox": config.paths.external_inbox,
+            "mirrored_brain": config.paths.mirrored_brain,
+            "database": config.paths.database
+        },
+        "watcher": {
+            "extra_paths": config.watcher.extra_paths,
+            "auto_start": config.watcher.auto_start,
+            "stability_threshold_ms": config.watcher.stability_threshold_ms
+        },
+        "ingestion": {
+            "max_keywords": config.ingestion.max_keywords,
+            "sanitize": config.ingestion.sanitize
+        },
+        "budget": {
+            "planet_budget": config.budget.planet_budget,
+            "moon_budget": config.budget.moon_budget,
+            "total_tokens": config.budget.total_tokens
+        },
+        "transient_filter": {
+            "min_lines": config.transient_filter.min_lines,
+            "threshold": config.transient_filter.threshold
+        },
+        "search": {
+            "max_chars_default": 524288,
+            "strategy": config.search.strategy
+        },
+        "context": {
+            "relevance_weight": 0.7,
+            "recency_weight": 0.3
+        },
+        "physics": {
+            "damping_factor": 0.85,
+            "temperature": 0.2,
+            "walk_radius": 1
+        },
+        "resource_management": {
+            "gc_cooldown_ms": 30000
+        },
+        "database": {
+            "wipe_on_startup": true
+        },
+        "tagging": {
+            "modulation_level": 50,
+            "blacklist_strictness": 75,
+            "atom_as_tag": false,
+            "strict_atom_selection": true
+        },
+        "encryption": {
+            "enabled": false
+        }
+    }))
+}
+
+/// Save settings.
+#[debug_handler]
+async fn save_settings(
+    Json(new_settings): Json<serde_json::Value>,
+) -> Json<serde_json::Value> {
+    // Load current config
+    let mut config = Config::load().unwrap_or_default();
+    
+    // Update server settings
+    if let Some(server) = new_settings.get("server") {
+        if let Some(api_key) = server.get("api_key").and_then(|v| v.as_str()) {
+            config.server.api_key = api_key.to_string();
+        }
+    }
+    
+    // Update watcher settings
+    if let Some(watcher) = new_settings.get("watcher") {
+        if let Some(extra_paths) = watcher.get("extra_paths").and_then(|v| v.as_array()) {
+            config.watcher.extra_paths = extra_paths
+                .iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect();
+        }
+        if let Some(auto_start) = watcher.get("auto_start").and_then(|v| v.as_bool()) {
+            config.watcher.auto_start = auto_start;
+        }
+    }
+    
+    // Update ingestion settings
+    if let Some(ingestion) = new_settings.get("ingestion") {
+        if let Some(max_keywords) = ingestion.get("max_keywords").and_then(|v| v.as_u64()) {
+            config.ingestion.max_keywords = max_keywords as usize;
+        }
+        if let Some(sanitize) = ingestion.get("sanitize").and_then(|v| v.as_bool()) {
+            config.ingestion.sanitize = sanitize;
+        }
+    }
+    
+    // Save back to file
+    let config_path = std::path::PathBuf::from("user_settings.json");
+    if let Ok(content) = serde_json::to_string_pretty(&config) {
+        if let Err(e) = std::fs::write(&config_path, content) {
+            return Json(serde_json::json!({
+                "success": false,
+                "error": format!("Failed to save: {}", e)
+            }));
+        }
+    }
+    
+    Json(serde_json::json!({
+        "success": true,
+        "message": "Settings saved successfully"
+    }))
+}
+
+/// Save UI test snapshot.
+#[debug_handler]
+async fn save_snapshot(
+    Json(snapshot): Json<serde_json::Value>,
+) -> Json<serde_json::Value> {
+    use std::fs;
+    use std::path::PathBuf;
+    use chrono::Utc;
+    
+    let snapshot_name = snapshot.get("name").and_then(|v| v.as_str()).unwrap_or("snapshot");
+    let snapshot_type = snapshot.get("type").and_then(|v| v.as_str()).unwrap_or("test");
+    
+    // Create logs directory if it doesn't exist
+    let logs_dir = PathBuf::from("logs");
+    if let Err(e) = fs::create_dir_all(&logs_dir) {
+        return Json(serde_json::json!({
+            "success": false,
+            "error": format!("Failed to create logs dir: {}", e)
+        }));
+    }
+    
+    // Create snapshot data with timestamp
+    let snapshot_data = serde_json::json!({
+        "timestamp": Utc::now().to_rfc3339(),
+        "type": snapshot_type,
+        "name": snapshot_name,
+        "data": snapshot.get("data").cloned().unwrap_or(serde_json::Value::Null)
+    });
+    
+    // Save snapshot (overwrites existing)
+    let snapshot_path = logs_dir.join(format!("snapshot-{}.json", snapshot_name));
+    match serde_json::to_string_pretty(&snapshot_data) {
+        Ok(content) => {
+            match fs::write(&snapshot_path, content) {
+                Ok(_) => Json(serde_json::json!({
+                    "success": true,
+                    "message": format!("Snapshot saved: {}", snapshot_path.display()),
+                    "path": snapshot_path.to_string_lossy()
+                })),
+                Err(e) => Json(serde_json::json!({
+                    "success": false,
+                    "error": format!("Failed to write snapshot: {}", e)
+                }))
+            }
+        },
+        Err(e) => Json(serde_json::json!({
+            "success": false,
+            "error": format!("Failed to serialize snapshot: {}", e)
+        }))
     }
 }

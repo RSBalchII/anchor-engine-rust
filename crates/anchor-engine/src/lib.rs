@@ -11,7 +11,7 @@
 //! # Quick Start
 //!
 //! ```rust,no_run
-//! use anchor_engine::{Database, AnchorService, start_server};
+//! use anchor_engine::{Database, AnchorService, Config, start_server};
 //! use std::sync::Arc;
 //! use tokio::sync::RwLock;
 //!
@@ -20,8 +20,12 @@
 //!     // Initialize database
 //!     let db = Database::open(std::path::Path::new("anchor.db")).unwrap();
 //!
+//!     // Load configuration
+//!     let config = Config::default();
+//!     let mirror_dir = config.mirrored_brain_path();
+//!
 //!     // Create service
-//!     let service = AnchorService::new(db);
+//!     let service = AnchorService::new(db, mirror_dir, config).unwrap();
 //!     let state = Arc::new(RwLock::new(service));
 //!
 //!     // Start HTTP server
@@ -44,7 +48,7 @@ pub use models::*;
 pub use service::AnchorService;
 pub use api::{start_server, create_router, SharedState};
 pub use config::{Config, UserSettings};
-pub use services::{WatchdogService, IngestionService, IngestionResult, IngestionConfig, GitHubService, GitHubRepo, AutoSynonymGenerator};
+pub use services::{WatchdogService, IngestionService, IngestionResult, GitHubService, GitHubRepo, AutoSynonymGenerator};
 pub use storage::{Storage, FileSystemStorage};
 pub use dto::{GithubIngestDto, GithubAction, GithubSyncParams, GithubCredentialsParams, GithubRateLimitParams, RateLimitInfo};
 

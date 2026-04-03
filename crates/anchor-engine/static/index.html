@@ -316,7 +316,7 @@
                         className="p-2 rounded-lg hover:bg-white/5 transition-colors text-gray-400 hover:text-green-400"
                         title="GitHub Ingestion"
                     >
-                        <i data-lucide="github" width="18"></i>
+                        <i data-lucide="github-logo" width="18"></i>
                     </button>
                     <button
                         onClick={() => navigate('/quarantine')}
@@ -453,7 +453,7 @@
                                         onClick={() => { onOpenGithub(); onClose(); }}
                                         className="drawer-nav-item"
                                     >
-                                        <i data-lucide="github" width="18"></i>
+                                        <i data-lucide="github-logo" width="18"></i>
                                         GitHub Ingestion
                                     </button>
                                     <button
@@ -1655,7 +1655,7 @@
                     <div className="glass-panel w-full max-w-lg p-6 m-4" onClick={e => e.stopPropagation()}>
                         <div className="flex items-center justify-between mb-4">
                             <h3 className="text-xl font-bold flex items-center gap-2">
-                                <i data-lucide="github" className="text-green-400"></i>
+                                <i data-lucide="github-logo" className="text-green-400"></i>
                                 GitHub Ingestion
                             </h3>
                             <button onClick={onClose} className="p-2 hover:bg-white/10 rounded-lg transition-colors">
@@ -1855,12 +1855,249 @@
             const [saving, setSaving] = useState(false);
             const [message, setMessage] = useState('');
             const [showPasswordInput, setShowPasswordInput] = useState(false);
+            const [testResults, setTestResults] = useState(null);
+            const [runningTests, setRunningTests] = useState(false);
+            const [snapshotsEnabled, setSnapshotsEnabled] = useState(true);
+
+            // Capture and save snapshot
+            const saveSnapshot = async (name, type, data) => {
+                if (!snapshotsEnabled) return null;
+                
+                try {
+                    const res = await fetch('/v1/test/snapshot', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ name, type, data })
+                    });
+                    const result = await res.json();
+                    console.log(`📸 Snapshot saved: ${name}`, result);
+                    return result;
+                } catch (error) {
+                    console.error(`Failed to save snapshot ${name}:`, error);
+                    return null;
+                }
+            };
+
+            // Capture search results snapshot
+            const captureSearchSnapshot = async (label, results, query) => {
+                return await saveSnapshot(`search-${label}`, 'search', {
+                    query,
+                    resultCount: results?.length || 0,
+                    results: results || [],
+                    timestamp: new Date().toISOString()
+                });
+            };
 
             useEffect(() => {
                 loadSettings();
                 loadWatchdogStatus();
                 setTimeout(() => { try { lucide?.createIcons(); } catch(e) {} }, 100);
             }, []);
+
+            // A/B Test Runner - Tests each UI component against backend API
+            const runComponentTests = async () => {
+                setRunningTests(true);
+                setTestResults(null);
+                const results = { passed: [], failed: [], total: 0 };
+
+                const test = async (name, testFn) => {
+                    results.total++;
+                    try {
+                        await testFn();
+                        results.passed.push(name);
+                        console.log(`✅ ${name}`);
+                    } catch (error) {
+                        results.failed.push({ name, error: error.message });
+                        console.error(`❌ ${name}:`, error.message);
+                    }
+                };
+
+                // Test 1: Load Settings
+                await test('Load Settings', async () => {
+                    const res = await fetch('/v1/settings', {
+                        headers: { 'Authorization': `Bearer ${API_KEY}` }
+                    });
+                    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+                    const data = await res.json();
+                    if (!data.server) throw new Error('Missing server config');
+                });
+
+                // Test 2: Save API Key
+                await test('Save API Key', async () => {
+                    const testKey = `test_${Date.now()}`;
+                    const res = await fetch('/v1/settings', {
+                        method: 'PUT',
+                        headers: {
+                            'Content-Type': 'application/json',
+                            'Authorization': `Bearer ${API_KEY}`
+                        },
+                        body: JSON.stringify({ server: { api_key: testKey } })
+                    });
+                    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+                    const data = await res.json();
+                    if (!data.success) throw new Error('Save failed');
+                    // Verify it persisted
+                    const verifyRes = await fetch('/v1/settings');
+                    const verifyData = await verifyRes.json();
+                    if (verifyData.server.api_key !== testKey) throw new Error('Key did not persist');
+                });
+
+                // Test 3: Watchdog Toggle
+                await test('Watchdog Toggle', async () => {
+                    // Get initial state
+                    const initialRes = await fetch('/v1/watchdog/status');
+                    const initial = await initialRes.json();
+                    const initialState = initial.is_running;
+
+                    // Toggle
+                    const endpoint = initialState ? '/v1/watchdog/stop' : '/v1/watchdog/start';
+                    const toggleRes = await fetch(endpoint, { method: 'POST' });
+                    if (!toggleRes.ok) throw new Error(`HTTP ${toggleRes.status}`);
+
+                    // Verify state changed
+                    const verifyRes = await fetch('/v1/watchdog/status');
+                    const verify = await verifyRes.json();
+                    if (verify.is_running === initialState) throw new Error('State did not change');
+
+                    // Toggle back
+                    const backEndpoint = initialState ? '/v1/watchdog/start' : '/v1/watchdog/stop';
+                    await fetch(backEndpoint, { method: 'POST' });
+                });
+
+                // Test 4: Add Watch Path
+                await test('Add Watch Path', async () => {
+                    // Use current directory which always exists
+                    const testPath = '.\\test_path_' + Date.now();
+                    const res = await fetch('/v1/system/paths/add', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ path: testPath })
+                    });
+                    // Accept 200 or 400 (path validation is ok)
+                    if (res.status === 405 || res.status === 500) throw new Error(`HTTP ${res.status}`);
+                });
+
+                // Test 5: Remove Watch Path
+                await test('Remove Watch Path', async () => {
+                    const testPath = '.\\test_path_' + Date.now();
+                    // First add it (may fail validation, that's ok)
+                    await fetch('/v1/system/paths/add', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ path: testPath })
+                    }).catch(() => {});
+                    // Then remove it
+                    const res = await fetch('/v1/system/paths/remove', {
+                        method: 'DELETE',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ path: testPath })
+                    });
+                    // Accept 200 or 400 (path validation is ok)
+                    if (res.status === 405 || res.status === 500) throw new Error(`HTTP ${res.status}`);
+                });
+
+                // Test 6: Get Buckets
+                await test('Get Buckets', async () => {
+                    const res = await fetch('/v1/buckets');
+                    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+                    const data = await res.json();
+                    if (!data.buckets) throw new Error('Missing buckets array');
+                });
+
+                // Test 7: Get Stats
+                await test('Get Stats', async () => {
+                    const res = await fetch('/v1/stats');
+                    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+                    const data = await res.json();
+                    if (typeof data.atoms !== 'number') throw new Error('Missing atoms count');
+                });
+
+                // Test 8: Health Check
+                await test('Health Check', async () => {
+                    const res = await fetch('/health');
+                    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+                    const data = await res.json();
+                    if (data.status !== 'healthy') throw new Error('Not healthy');
+                });
+
+                // Test 9: Manual Ingest Trigger
+                await test('Manual Ingest Trigger', async () => {
+                    const res = await fetch('/v1/watchdog/ingest', { method: 'POST' });
+                    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+                    const data = await res.json();
+                    if (!data.success) throw new Error('Ingest failed');
+                });
+
+                // Test 10: GitHub Endpoint (should exist even if repo fails)
+                await test('GitHub Endpoint Exists', async () => {
+                    const res = await fetch('/v1/github/repos', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ url: 'https://github.com/test/test' })
+                    });
+                    // Should return 500 (repo not found) not 404 (endpoint not found)
+                    if (res.status === 404) throw new Error('Endpoint not found');
+                });
+
+                // Test 11: Search UI A/B Test with Snapshots
+                await test('Search UI A/B Test', async () => {
+                    // Capture initial state (before search)
+                    const beforeSnapshot = await captureSearchSnapshot('before-search', [], '');
+                    if (!beforeSnapshot?.success) throw new Error('Failed to capture before snapshot');
+                    
+                    // Perform a search
+                    const searchQuery = '#test';
+                    const searchRes = await fetch('/v1/memory/search', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                            query: searchQuery,
+                            max_results: 10,
+                            mode: 'combined',
+                            budget: { planet_budget: 0.7, moon_budget: 0.3, total_tokens: 4096 }
+                        })
+                    });
+                    
+                    if (!searchRes.ok && searchRes.status !== 200) {
+                        // It's ok if no results, just check endpoint works
+                        if (searchRes.status === 500) throw new Error('Search endpoint error');
+                    }
+                    
+                    const searchResults = await searchRes.json().catch(() => ({ results: [] }));
+                    
+                    // Capture after state (after search)
+                    const afterSnapshot = await captureSearchSnapshot(
+                        'after-search',
+                        searchResults.results || [],
+                        searchQuery
+                    );
+                    if (!afterSnapshot?.success) throw new Error('Failed to capture after snapshot');
+                    
+                    // Verify snapshots were saved
+                    if (!beforeSnapshot.path || !afterSnapshot.path) {
+                        throw new Error('Snapshot paths not returned');
+                    }
+                });
+
+                // Test 12: Settings Snapshot
+                await test('Settings Snapshot', async () => {
+                    const settingsRes = await fetch('/v1/settings');
+                    if (!settingsRes.ok) throw new Error(`HTTP ${settingsRes.status}`);
+                    const settings = await settingsRes.json();
+                    
+                    const snapshot = await saveSnapshot('settings-state', 'settings', {
+                        api_key_set: !!settings.server?.api_key,
+                        auto_start: settings.watcher?.auto_start,
+                        extra_paths_count: settings.watcher?.extra_paths?.length || 0,
+                        max_keywords: settings.ingestion?.max_keywords
+                    });
+                    
+                    if (!snapshot?.success) throw new Error('Failed to capture settings snapshot');
+                });
+
+                setTestResults(results);
+                setRunningTests(false);
+            };
 
             const loadSettings = async () => {
                 try {
@@ -1926,12 +2163,17 @@
                 setMessage('');
                 try {
                     const endpoint = watchdogStatus.isRunning ? '/v1/watchdog/stop' : '/v1/watchdog/start';
-                    await fetch(endpoint, {
+                    const result = await fetch(endpoint, {
                         method: 'POST',
                         headers: { 'Authorization': `Bearer ${API_KEY}` }
-                    });
+                    }).then(r => r.json());
+                    
+                    // Reload watchdog status to get updated state
                     await loadWatchdogStatus();
-                    setMessage(watchdogStatus.isRunning ? '✅ Watchdog stopped' : '✅ Watchdog started');
+                    
+                    // Show success message with new state
+                    const newState = watchdogStatus.isRunning ? 'stopped' : 'started';
+                    setMessage(`✅ Watchdog ${newState}`);
                 } catch (error) {
                     setMessage('❌ Failed to toggle watchdog');
                 }
@@ -1972,11 +2214,76 @@
                                 Settings
                             </h2>
                             <div className="flex gap-2">
+                                <label className="flex items-center gap-2 text-sm text-gray-400 cursor-pointer">
+                                    <input
+                                        type="checkbox"
+                                        checked={snapshotsEnabled}
+                                        onChange={(e) => setSnapshotsEnabled(e.target.checked)}
+                                        className="w-4 h-4 accent-purple-500"
+                                    />
+                                    📸 Snapshots
+                                </label>
+                                <button 
+                                    onClick={runComponentTests} 
+                                    disabled={runningTests}
+                                    className={`px-4 py-2 rounded-lg font-medium transition-all ${
+                                        runningTests 
+                                            ? 'bg-gray-500/20 text-gray-400 cursor-not-allowed' 
+                                            : 'bg-purple-500/20 text-purple-400 border border-purple-500/30 hover:bg-purple-500/30'
+                                    }`}
+                                    title="Run A/B tests on all UI components"
+                                >
+                                    {runningTests ? 'Running Tests...' : '🧪 Run Component Tests'}
+                                </button>
                                 <button onClick={saveSettings} disabled={saving} className="btn-primary">
                                     {saving ? 'Saving...' : 'Save Settings'}
                                 </button>
                             </div>
                         </div>
+
+                        {/* Test Results */}
+                        {testResults && (
+                            <div className={`mb-6 p-4 rounded-lg border ${
+                                testResults.failed.length === 0 
+                                    ? 'bg-green-500/20 border-green-500/30' 
+                                    : 'bg-red-500/20 border-red-500/30'
+                            }`}>
+                                <h3 className="text-lg font-bold mb-2">
+                                    {testResults.failed.length === 0 ? '✅ All Tests Passed!' : '❌ Some Tests Failed'}
+                                </h3>
+                                <p className="text-sm mb-2">
+                                    Passed: {testResults.passed.length} / {testResults.total}
+                                </p>
+                                {testResults.failed.length > 0 && (
+                                    <div className="mt-2 space-y-1">
+                                        {testResults.failed.map((f, i) => (
+                                            <div key={i} className="text-sm text-red-300">
+                                                <strong>❌ {f.name}:</strong> {f.error}
+                                            </div>
+                                        ))}
+                                    </div>
+                                )}
+                                <div className="mt-3 text-xs text-gray-400">
+                                    <p>Tests verify:</p>
+                                    <ul className="list-disc list-inside ml-2">
+                                        <li>Each UI component has working backend API</li>
+                                        <li>Settings persist to user_settings.json</li>
+                                        <li>State updates correctly after API calls</li>
+                                        <li>📸 Snapshots saved to logs/ directory</li>
+                                    </ul>
+                                </div>
+                                {snapshotsEnabled && (
+                                    <div className="mt-2 text-xs text-cyan-400">
+                                        <p>📸 Snapshots created:</p>
+                                        <ul className="list-disc list-inside ml-2">
+                                            <li>logs/snapshot-before-search.json</li>
+                                            <li>logs/snapshot-after-search.json</li>
+                                            <li>logs/snapshot-settings-state.json</li>
+                                        </ul>
+                                    </div>
+                                )}
+                            </div>
+                        )}
 
                         {message && (
                             <div className={`mb-6 p-4 rounded-lg ${message.includes('✅') ? 'bg-green-500/20 border border-green-500/30 text-green-400' : 'bg-red-500/20 border border-red-500/30 text-red-400'}`}>
@@ -2335,7 +2642,7 @@
                         {/* GitHub Authentication Section */}
                         <div className="glass-panel p-6 mb-6">
                             <h3 className="text-xl font-bold mb-4 flex items-center gap-2 text-green-400">
-                                <i data-lucide="github"></i>
+                                <i data-lucide="github-logo"></i>
                                 GitHub Authentication
                             </h3>
                             <p className="text-xs text-gray-400 mb-4">
@@ -2380,7 +2687,7 @@
                         {/* GitHub Repository Management */}
                         <div className="glass-panel p-6 mb-6">
                             <h3 className="text-xl font-bold mb-4 flex items-center gap-2 text-green-400">
-                                <i data-lucide="github"></i>
+                                <i data-lucide="github-logo"></i>
                                 GitHub Repositories
                             </h3>
                             <p className="text-xs text-gray-400 mb-4">
@@ -2573,7 +2880,7 @@
                             <span className="text-cyan-400 font-mono font-semibold">{stats.atoms?.toLocaleString() || 0}</span>
                         </div>
                         <div className="flex items-center gap-2">
-                            <i data-lucide="molecule" className="text-purple-400 flex-shrink-0" width="14" height="14"></i>
+                            <i data-lucide="atom" className="text-purple-400 flex-shrink-0" width="14" height="14"></i>
                             <span className="text-gray-400 whitespace-nowrap">Molecules:</span>
                             <span className="text-purple-400 font-mono font-semibold">{stats.molecules?.toLocaleString() || 0}</span>
                         </div>

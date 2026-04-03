@@ -1,7 +1,7 @@
 //! Core service logic for Anchor Engine.
 //!
 //! Integrates atomizer, fingerprint, keyextract, and tagwalker with the database.
-//! 
+//!
 //! **Pointer-Only Storage Pattern:**
 //! - Content is written to mirrored_brain/ via FileSystemStorage
 //! - Database stores only pointers (source_path, start_byte, end_byte)
@@ -14,11 +14,12 @@ use anchor_atomizer::{atomize, sanitize};
 use anchor_fingerprint::simhash;
 use anchor_keyextract::{extract_keywords, SynonymRing};
 use anchor_tagwalker::{TagWalker, TagWalkerConfig, ResultType};
-use tracing::{info, debug};
+use tracing::info;
 
 use crate::db::{Database, Result};
 use crate::models::*;
 use crate::storage::{Storage, FileSystemStorage};
+use crate::config::Config;
 
 /// Core Anchor service.
 pub struct AnchorService {
@@ -26,11 +27,12 @@ pub struct AnchorService {
     storage: FileSystemStorage,
     tag_walker: TagWalker,
     synonym_ring: SynonymRing,
+    config: Config,
 }
 
 impl AnchorService {
     /// Create a new Anchor service with pointer-only storage.
-    pub fn new(db: Database, mirror_dir: PathBuf) -> Result<Self> {
+    pub fn new(db: Database, mirror_dir: PathBuf, config: Config) -> Result<Self> {
         let storage = FileSystemStorage::new(mirror_dir)
             .map_err(|e| crate::db::DbError::Migration(e.to_string()))?;
         let tag_walker = TagWalker::new();
@@ -39,12 +41,13 @@ impl AnchorService {
         // ℹ️ INFO log when AnchorService is created
         info!("🚀 AnchorService initialized (pointer-only storage)");
 
-        Self {
+        Ok(Self {
             db,
             storage,
             tag_walker,
             synonym_ring,
-        }
+            config,
+        })
     }
 
     /// Ingest content into the knowledge base with pointer-only storage.
@@ -72,7 +75,6 @@ impl AnchorService {
 
         // Write to mirrored_brain/ and get file path
         let source_path = self.storage.write_cleaned(&source_id, &content)?;
-        let content_bytes = content.as_bytes();
 
         // Atomize content
         let atoms = atomize(&content);
@@ -106,19 +108,23 @@ impl AnchorService {
             // Extract keywords as tags if requested
             let mut tags = Vec::new();
             if request.options.extract_tags {
-                let keywords = extract_keywords(&atom_data.content, request.options.max_keywords);
+                let max_keywords = if request.options.max_keywords > 0 {
+                    request.options.max_keywords
+                } else {
+                    self.config.ingestion.max_keywords
+                };
+                let keywords = extract_keywords(&atom_data.content, max_keywords);
 
-                for kw in keywords {
-                    if kw.score > 0.3 { // Threshold for relevance
-                        let tag = format!("#{}", kw.term.to_lowercase());
-                        tags.push(Tag {
-                            id: 0,
-                            atom_id,
-                            tag: tag.clone(),
-                            bucket: None,
-                        });
-                        all_tags.push(tag);
-                    }
+                for keyword in keywords {
+                    // Simple keyword extraction - just use the keyword string directly
+                    let tag = format!("#{}", keyword.to_lowercase());
+                    tags.push(Tag {
+                        id: 0,
+                        atom_id,
+                        tag: tag.clone(),
+                        bucket: None,
+                    });
+                    all_tags.push(tag);
                 }
             }
 
@@ -153,13 +159,13 @@ impl AnchorService {
             || request.mode == SearchMode::MaxRecall;
 
         // Extract keywords from query and convert to tags
-        let query_tags = anchor_keyextract::extract_keywords(&request.query, 20);
+        let max_keywords = self.config.ingestion.max_keywords;
+        let query_tags = anchor_keyextract::extract_keywords(&request.query, max_keywords);
         let tag_query: Vec<String> = query_tags
             .iter()
-            .filter(|kw| kw.score > 0.2)
-            .map(|kw| format!("#{}", kw.term.to_lowercase()))
+            .map(|kw| format!("#{}", kw.to_lowercase()))
             .collect();
-        
+
         let query_str = if tag_query.is_empty() {
             request.query.clone()  // Fallback to original query
         } else {
@@ -174,11 +180,17 @@ impl AnchorService {
         }
 
         // Configure tag walker based on mode
+        let max_results = if request.max_results > 0 {
+            request.max_results
+        } else {
+            self.config.search.max_results
+        };
+
         let config = if use_max_recall {
             // Max-recall mode: zero temporal decay, 3 hops, high serendipity
             info!("   ├─ Max-recall mode: 3 hops, zero decay");
             TagWalkerConfig::default()
-                .with_max_results(request.max_results)
+                .with_max_results(max_results)
                 .with_planet_budget(request.budget.planet_budget)
                 .with_moon_budget(request.budget.moon_budget)
                 .with_max_hops(3)  // 3 hops for max recall
@@ -187,7 +199,7 @@ impl AnchorService {
         } else {
             // Standard mode: default settings
             TagWalkerConfig::default()
-                .with_max_results(request.max_results)
+                .with_max_results(max_results)
                 .with_planet_budget(request.budget.planet_budget)
                 .with_moon_budget(request.budget.moon_budget)
         };
@@ -213,10 +225,14 @@ impl AnchorService {
                     }
                 };
 
+                // Load content from filesystem
+                let content = self.storage.read_range(&atom.source_path, atom.start_byte, atom.end_byte)
+                    .unwrap_or_else(|_| atom.source_path.clone());
+
                 results.push(SearchResultItem {
                     atom_id: atom.id,
                     source_id: atom.source_id,
-                    content: atom.content,
+                    content,
                     relevance: walker_result.relevance,
                     matched_tags: walker_result.matched_tags.clone(),
                     result_type: result_type.to_string(),
@@ -331,10 +347,10 @@ impl AnchorService {
                 Ok(a) => a,
                 Err(_) => continue,
             };
-            
+
             // Load content from filesystem (zero-copy via mmap)
-            let content = match self.storage.read_range(&atom.source_path, atom.start_byte, atom.end_byte).await {
-                Ok(bytes) => String::from_utf8_lossy(&bytes).to_string(),
+            let content = match self.storage.read_range(&atom.source_path, atom.start_byte, atom.end_byte) {
+                Ok(content_str) => content_str,
                 Err(_) => atom.source_path.clone(), // Fallback to path if read fails
             };
             
@@ -377,15 +393,16 @@ impl AnchorService {
                 }
             }
         }
-        
+
         let duration = start.elapsed().as_millis() as f64;
-        
+        let total = results.len();
+
         info!("   └─ ✅ COMPLETE: {} nodes illuminated ({} explored) in {:.1}ms",
-              results.len(), nodes_explored, duration);
-        
+              total, nodes_explored, duration);
+
         Ok(IlluminateResponse {
             nodes: results,
-            total: results.len(),
+            total,
             nodes_explored,
             duration_ms: duration,
         })
@@ -412,7 +429,6 @@ impl AnchorService {
         use std::collections::{HashMap, HashSet};
         use std::fs::{self, OpenOptions};
         use std::io::Write;
-        use anchor_fingerprint::simhash;
 
         let start = Instant::now();
 
@@ -454,20 +470,16 @@ impl AnchorService {
                 };
 
                 // Zero-copy content load from filesystem
-                let content_bytes = match self.storage.read_range(&atom.source_path, atom.start_byte, atom.end_byte).await {
-                    Ok(bytes) => bytes,
+                let content_str = match self.storage.read_range(&atom.source_path, atom.start_byte, atom.end_byte) {
+                    Ok(content) => content,
                     Err(_) => continue,
                 };
 
-                // CRITICAL: Hash raw bytes FIRST (no UTF-8 validation)
-                // This avoids O(N) UTF-8 scan on duplicate blocks
-                let content_hash = anchor_fingerprint::simhash_bytes(&content_bytes);
+                // CRITICAL: Hash content for deduplication
+                let content_hash = anchor_fingerprint::simhash(&content_str);
                 if !seen_hashes.insert(content_hash) {
-                    continue; // Duplicate - skipped WITHOUT UTF-8 validation
+                    continue; // Duplicate - skipped
                 }
-
-                // Only validate UTF-8 for UNIQUE blocks (after dedup)
-                let content_str = String::from_utf8_lossy(&content_bytes);
 
                 // Calculate gravity score (damped by hop distance)
                 let damping_factor: f64 = 0.85;
@@ -556,7 +568,7 @@ impl AnchorService {
             } else {
                 1.0
             },
-            records: decision_records,
+            records: decision_records.clone(),
             duration_ms: start.elapsed().as_millis() as f64,
         })?;
 
@@ -571,9 +583,10 @@ impl AnchorService {
             .map_err(|e| crate::db::DbError::Migration(e.to_string()))?;
 
         let duration = start.elapsed().as_millis() as f64;
+        let total_records = decision_records.len();
 
         info!("   └─ ✅ COMPLETE: {} records, {} compression ratio in {:.1}ms",
-              decision_records.len(),
+              total_records,
               if original_tokens > 0 { format!("{:.1}%", (distilled_tokens as f64 / original_tokens as f64) * 100.0) } else { "N/A".to_string() },
               duration);
 
@@ -594,11 +607,14 @@ impl AnchorService {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tempfile::TempDir;
 
     #[tokio::test]
     async fn test_ingest_and_search() {
         let db = Database::in_memory().unwrap();
-        let mut service = AnchorService::new(db);
+        let temp_dir = TempDir::new().unwrap();
+        let config = Config::default();
+        let mut service = AnchorService::new(db, temp_dir.path().to_path_buf(), config).unwrap();
 
         // Ingest content
         let ingest_request = IngestRequest {

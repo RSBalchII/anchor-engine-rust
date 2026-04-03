@@ -5,13 +5,44 @@
 //! anchor-engine --port 3160 --db-path ./anchor.db
 //! ```
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use tracing_subscriber::{self, EnvFilter};
+use tracing_appender::rolling::{RollingFileAppender, Rotation};
+use std::fs::File;
+use std::io::{Read, Write};
+use std::fs;
 use tracing::error;
 
-use anchor_engine::{Database, AnchorService, start_server, Config, WatchdogService, IngestionService, IngestionConfig, AutoSynonymGenerator};
+use anchor_engine::{Database, AnchorService, start_server, Config, WatchdogService, IngestionService, AutoSynonymGenerator};
+
+/// Truncate log file to last N lines
+fn truncate_log_file(path: &Path, max_lines: usize) -> std::io::Result<()> {
+    if !path.exists() {
+        return Ok(());
+    }
+    
+    // Read all lines
+    let mut file = File::open(path)?;
+    let mut content = String::new();
+    file.read_to_string(&mut content)?;
+    
+    let lines: Vec<&str> = content.lines().collect();
+    
+    // Keep only last max_lines
+    if lines.len() > max_lines {
+        let start = lines.len() - max_lines;
+        let truncated = lines[start..].join("\n");
+        
+        // Write back
+        let mut file = File::create(path)?;
+        file.write_all(truncated.as_bytes())?;
+        file.write_all(b"\n")?;
+    }
+    
+    Ok(())
+}
 
 /// CLI arguments.
 #[derive(Debug)]
@@ -78,19 +109,51 @@ impl Args {
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
 
-    // Initialize logging
+    // Ensure logs directory exists
+    let logs_dir = PathBuf::from("logs");
+    if let Err(e) = fs::create_dir_all(&logs_dir) {
+        eprintln!("Failed to create logs directory: {}", e);
+    }
+    
+    // Truncate existing log file to last 3000 lines
+    let log_path = logs_dir.join("anchor-engine.log");
+    if let Err(e) = truncate_log_file(log_path.as_path(), 3000) {
+        eprintln!("Failed to truncate log file: {}", e);
+    }
+
+    // Initialize logging with rolling file appender
     let log_level = if args.verbose { "debug" } else { "info" };
+    
+    // Create rolling file appender
+    let file_appender = RollingFileAppender::new(
+        Rotation::DAILY,
+        "logs",
+        "anchor-engine.log",
+    );
+    
+    // Create a non-blocking writer
+    let (non_blocking, _guard) = tracing_appender::non_blocking(file_appender);
+    
+    // Initialize both console and file logging
     tracing_subscriber::fmt()
         .with_env_filter(
             EnvFilter::from_default_env()
                 .add_directive(log_level.parse()?)
-                .add_directive("tower_http=info".parse()?)  // For HTTP request logging
+                .add_directive("tower_http=info".parse()?)
         )
+        .with_writer(non_blocking)
+        .with_target(false)
+        .with_thread_ids(false)
+        .with_file(false)
+        .with_line_number(false)
         .init();
 
-    tracing::info!("Starting Anchor Engine v{}", anchor_engine::VERSION);
+    tracing::info!("╔═══════════════════════════════════════════════════════════╗");
+    tracing::info!("║     Anchor Engine v{} - Starting                    ║", anchor_engine::VERSION);
+    tracing::info!("╚═══════════════════════════════════════════════════════════╝");
     tracing::info!("Database path: {:?}", args.db_path);
     tracing::info!("HTTP port: {}", args.port);
+    tracing::info!("Logs: logs/anchor-engine.log (rolling, max 3000 lines)");
 
     // Ensure parent directory exists
     if let Some(parent) = args.db_path.parent() {
@@ -106,35 +169,38 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing::info!("Database contains {} atoms, {} sources, {} tags",
                    stats.atom_count, stats.source_count, stats.tag_count);
 
-    // Load configuration
+    // Load configuration with environment variable overrides
     tracing::info!("Loading configuration...");
-    let config = Config::load().unwrap_or_default();
-    tracing::info!("Inbox: {:?}", config.settings.inbox_path());
-    tracing::info!("External Inbox: {:?}", config.settings.external_inbox_path());
-    tracing::info!("Mirrored Brain: {:?}", config.settings.mirrored_brain_path());
-    tracing::info!("Watch paths: {:?}", config.settings.watch_paths);
+    let config = Config::load_with_env_overrides().unwrap_or_default();
+    
+    // Validate configuration
+    if let Err(e) = config.validate() {
+        tracing::warn!("Configuration validation warning: {}", e);
+    }
+    
+    tracing::info!("Inbox: {:?}", config.inbox_path());
+    tracing::info!("External Inbox: {:?}", config.external_inbox_path());
+    tracing::info!("Mirrored Brain: {:?}", config.mirrored_brain_path());
 
-    // Create ingestion service
-    let ingestion_config = IngestionConfig {
-        mirrored_brain_path: config.settings.mirrored_brain_path(),
-        batch_size: config.settings.ingestion_batch_size,
-        max_keywords: 10,
-        min_keyword_score: 0.3,
-        sanitize: true,
-    };
-    let ingestion_service = IngestionService::new(db.clone(), ingestion_config);
+    // Build watch paths from config
+    let mut watch_paths = vec![config.paths.notebook.clone()];
+    watch_paths.extend(config.watcher.extra_paths.iter().cloned());
+    tracing::info!("Watch paths: {:?}", watch_paths);
+
+    // Create ingestion service with config
+    let ingestion_service = IngestionService::new(db.clone(), config.clone());
 
     // Create watchdog service
-    let watchdog = WatchdogService::from_settings(
-        &config.settings,
+    let watchdog = WatchdogService::from_config(
+        &config,
         Arc::new(RwLock::new(ingestion_service)),
     );
 
     // Create service with pointer-only storage
-    let mirror_dir = config.settings.mirrored_brain_path();
+    let mirror_dir = config.mirrored_brain_path();
     tracing::info!("Mirror directory: {:?}", mirror_dir);
-    
-    let service = AnchorService::new(db.clone(), mirror_dir)
+
+    let service = AnchorService::new(db.clone(), mirror_dir, config.clone())
         .expect("Failed to create AnchorService with storage");
     let state: Arc<RwLock<AnchorService>> = Arc::new(RwLock::new(service));
 
@@ -151,7 +217,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     watchdog.start().await;
     println!("📥 Watchdog Service: ACTIVE");
     println!("   Watching:");
-    for path in config.settings.all_watch_paths() {
+    for path in &watch_paths {
         println!("     - {:?}", path);
     }
     println!();

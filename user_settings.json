@@ -1,11 +1,59 @@
 {
-  "inbox_path": "./inbox",
-  "external_inbox_path": "./external-inbox",
-  "mirrored_brain_path": "./mirrored_brain",
-  "database_path": "./anchor.db",
-  "watch_paths": [],
-  "github_token": null,
-  "watcher_stability_threshold_ms": 500,
-  "auto_ingest": true,
-  "ingestion_batch_size": 50
+  "version": "0.1.0",
+  "server": {
+    "host": "0.0.0.0",
+    "port": 3160,
+    "api_key": "test_1775156573757"
+  },
+  "github": {
+    "token": "",
+    "default_branch": "main",
+    "api_base_url": "https://api.github.com"
+  },
+  "paths": {
+    "notebook": "notebook",
+    "inbox": "notebook/inbox",
+    "external_inbox": "notebook/external-inbox",
+    "mirrored_brain": ".anchor/mirrored_brain",
+    "database": "anchor.db",
+    "logs": "logs"
+  },
+  "search": {
+    "strategy": "hybrid",
+    "max_results": 50,
+    "fts_window_size": 1500,
+    "fts_padding": 750
+  },
+  "watcher": {
+    "debounce_ms": 2000,
+    "stability_threshold_ms": 2000,
+    "extra_paths": [],
+    "auto_start": true
+  },
+  "limits": {
+    "max_file_size_bytes": 104857600,
+    "max_content_length_chars": 5000,
+    "max_chunk_size_chars": 3000
+  },
+  "ingestion": {
+    "concept_density": "high",
+    "tag_threshold": 0.7,
+    "dedup_strength": "aggressive",
+    "token_budget_default": 2000,
+    "max_keywords": 10,
+    "min_keyword_score": 0.3,
+    "sanitize": true
+  },
+  "budget": {
+    "planet_budget": 0.7,
+    "moon_budget": 0.3,
+    "total_tokens": 8192,
+    "max_recall": false
+  },
+  "transient_filter": {
+    "min_lines": 5,
+    "threshold": 0.5
+  },
+  "_description": "Anchor Engine Configuration - Single Source of Truth",
+  "_version": "0.1.0"
 }

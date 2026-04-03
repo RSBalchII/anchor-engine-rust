@@ -1,6 +1,6 @@
 # Architecture Standards Index
 
-**Last Updated:** February 23, 2026 | **Total Standards:** 3
+**Last Updated:** April 1, 2026 | **Total Standards:** 7
 
 ---
 
@@ -15,6 +15,8 @@ These standards define the current Rust implementation:
 | **Code Style** | [code_style.md](code_style.md) | Rust formatting, naming, structure | ✅ ACTIVE |
 | **Documentation** | [doc_policy.md](doc_policy.md) | Documentation-driven development | ✅ ACTIVE |
 | **Testing** | [testing.md](testing.md) | Unit tests, integration tests, doc tests | ✅ ACTIVE |
+| **003** | [003-external-data-ingestion.md](003-external-data-ingestion.md) | DTO pattern for external APIs | ✅ ACTIVE |
+| **004** | [004-secure-credential-storage.md](004-secure-credential-storage.md) | OS credential manager for secrets | ✅ ACTIVE |
 
 ---
 

@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 use std::fs;
 use std::io::{self, Read, Write};
 use thiserror::Error;
-use tracing::{info, debug, error};
+use tracing::{info, error};
 
 use anchor_atomizer::{atomize, sanitize};
 use anchor_fingerprint::simhash;
@@ -21,6 +21,7 @@ use anchor_keyextract::extract_keywords;
 
 use crate::db::Database;
 use crate::models::{Atom, Source, Tag};
+use crate::config::Config;
 
 /// Ingestion errors.
 #[derive(Error, Debug)]
@@ -61,44 +62,17 @@ pub struct IngestionResult {
     pub processing_time_ms: f64,
 }
 
-/// Ingestion service configuration.
-#[derive(Debug, Clone)]
-pub struct IngestionConfig {
-    /// Path to mirrored brain directory
-    pub mirrored_brain_path: PathBuf,
-    /// Batch size for database inserts
-    pub batch_size: usize,
-    /// Maximum keywords to extract per atom
-    pub max_keywords: usize,
-    /// Minimum keyword score threshold
-    pub min_keyword_score: f32,
-    /// Enable sanitization
-    pub sanitize: bool,
-}
-
-impl Default for IngestionConfig {
-    fn default() -> Self {
-        Self {
-            mirrored_brain_path: PathBuf::from("mirrored_brain"),
-            batch_size: 50,
-            max_keywords: 10,
-            min_keyword_score: 0.3,
-            sanitize: true,
-        }
-    }
-}
-
 /// Ingestion service.
 pub struct IngestionService {
     /// Database connection
     db: Database,
-    /// Service configuration
-    config: IngestionConfig,
+    /// Configuration (provides ingestion settings)
+    config: Config,
 }
 
 impl IngestionService {
     /// Create a new Ingestion service.
-    pub fn new(db: Database, config: IngestionConfig) -> Self {
+    pub fn new(db: Database, config: Config) -> Self {
         Self { db, config }
     }
 
@@ -107,7 +81,7 @@ impl IngestionService {
         let db = Database::in_memory().map_err(IngestionError::from)?;
         Ok(Self {
             db,
-            config: IngestionConfig::default(),
+            config: Config::default(),
         })
     }
 
@@ -153,7 +127,7 @@ impl IngestionService {
         info!("   ├─ ✓ Mirrored: {}", mirrored_path.display());
 
         // Sanitize content if enabled
-        let content = if self.config.sanitize {
+        let content = if self.config.ingestion.sanitize {
             sanitize(&content)
         } else {
             content
@@ -196,16 +170,20 @@ impl IngestionService {
         info!("   ├─ [AtomicIngest] START Persisting: {} atoms", atoms_data.len());
         let persist_start = std::time::Instant::now();
 
+        let mirrored_path_str = mirrored_path.to_string_lossy().to_string();
+
         for (i, atom_data) in atoms_data.iter().enumerate() {
             // Generate SimHash
             let hash = simhash(&atom_data.content);
             last_simhash = hash;
 
-            // Create atom
+            // Create atom with pointer-only storage
             let atom = Atom {
                 id: 0, // Will be assigned by DB
                 source_id: source_id.clone(),
-                content: atom_data.content.clone(),
+                source_path: mirrored_path_str.clone(),
+                start_byte: atom_data.char_start,
+                end_byte: atom_data.char_end,
                 char_start: atom_data.char_start,
                 char_end: atom_data.char_end,
                 timestamp: std::time::SystemTime::now()
@@ -215,27 +193,26 @@ impl IngestionService {
                 simhash: hash,
                 tags: Vec::new(),
                 metadata: None,
+                content: None, // Pointer-only, content loaded on-demand
             };
 
             let atom_id = self.db.insert_atom(&atom).await?;
             atom_ids.push(atom_id);
 
             // Extract keywords as tags
-            let keywords = extract_keywords(&atom_data.content, self.config.max_keywords);
+            let keywords = extract_keywords(&atom_data.content, self.config.ingestion.max_keywords);
             let mut tags = Vec::new();
 
-            for kw in keywords {
-                if kw.score >= self.config.min_keyword_score {
-                    let tag = format!("#{}", kw.term.to_lowercase());
-                    tags.push(Tag {
-                        id: 0,
-                        atom_id,
-                        tag: tag.clone(),
-                        bucket: None,
-                    });
-                    all_tags.push(tag.clone());
-                    total_tags_extracted += 1;
-                }
+            for keyword in keywords {
+                let tag = format!("#{}", keyword.to_lowercase());
+                tags.push(Tag {
+                    id: 0,
+                    atom_id,
+                    tag: tag.clone(),
+                    bucket: None,
+                });
+                all_tags.push(tag.clone());
+                total_tags_extracted += 1;
             }
 
             // Add tags to database
@@ -286,7 +263,7 @@ impl IngestionService {
             .strip_prefix(std::env::current_dir().unwrap_or_default())
             .unwrap_or(source_path);
         
-        let mirrored_path = self.config.mirrored_brain_path.join(relative_path);
+        let mirrored_path = PathBuf::from(&self.config.paths.mirrored_brain).join(relative_path);
 
         // Ensure parent directory exists
         if let Some(parent) = mirrored_path.parent() {
@@ -335,7 +312,7 @@ impl IngestionService {
         let source_id = format!("src_{}", source.replace("/", "_").replace("\\", "_"));
 
         // Sanitize content if enabled
-        let content = if self.config.sanitize {
+        let content = if self.config.ingestion.sanitize {
             sanitize(content)
         } else {
             content.to_string()
@@ -370,11 +347,14 @@ impl IngestionService {
             // Generate SimHash
             let hash = simhash(&atom_data.content);
 
-            // Create atom
+            // Create atom with pointer-only storage
+            // For inline content, we use a virtual path
             let atom = Atom {
                 id: 0,
                 source_id: source_id.clone(),
-                content: atom_data.content.clone(),
+                source_path: format!("inline:{}", source_id),
+                start_byte: atom_data.char_start,
+                end_byte: atom_data.char_end,
                 char_start: atom_data.char_start,
                 char_end: atom_data.char_end,
                 timestamp: std::time::SystemTime::now()
@@ -384,26 +364,25 @@ impl IngestionService {
                 simhash: hash,
                 tags: Vec::new(),
                 metadata: None,
+                content: None,
             };
 
             let atom_id = self.db.insert_atom(&atom).await?;
             atom_ids.push(atom_id);
 
             // Extract keywords as tags
-            let keywords = extract_keywords(&atom_data.content, self.config.max_keywords);
+            let keywords = extract_keywords(&atom_data.content, self.config.ingestion.max_keywords);
             let mut tags = Vec::new();
 
-            for kw in keywords {
-                if kw.score >= self.config.min_keyword_score {
-                    let tag = format!("#{}", kw.term.to_lowercase());
-                    tags.push(Tag {
-                        id: 0,
-                        atom_id,
-                        tag: tag.clone(),
-                        bucket: None,
-                    });
-                    all_tags.push(tag);
-                }
+            for keyword in keywords {
+                let tag = format!("#{}", keyword.to_lowercase());
+                tags.push(Tag {
+                    id: 0,
+                    atom_id,
+                    tag: tag.clone(),
+                    bucket: None,
+                });
+                all_tags.push(tag);
             }
 
             // Add tags to database
